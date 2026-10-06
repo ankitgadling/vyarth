@@ -1,0 +1,11 @@
+.vyarth/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.coverage
+htmlcov/
+output.txt
