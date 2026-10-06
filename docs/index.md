@@ -8,8 +8,10 @@ Vyarth requires Python 3.11 or newer. The license is MIT. Release notes are in [
 
 ## Install
 
+Vyarth is not published on PyPI yet. From a checkout of this repository:
+
 ```bash
-pip install vyarth
+pip install .
 ```
 
 To work on Vyarth itself:
@@ -67,3 +69,4 @@ print(result.to_json())
 | Baselines, SARIF, and GitHub Actions | [Continuous integration](continuous-integration.md) |
 | Automatic rewrites and the language server | [Fix and editor](fix-and-editor.md) |
 | Entries, reachability, and known limits | [How analysis works](how-analysis-works.md) |
+| Counts against Vulture on Flask and requests | [Comparison](comparison.md) |

@@ -9,7 +9,7 @@ import sys
 from urllib.parse import unquote, urlparse
 
 from vyarth.config import load_config
-from vyarth.discover import discover_files, relative_posix
+from vyarth.discover import discover_files, project_root, relative_posix
 from vyarth.engine import scan
 from vyarth.fix import is_fixable, rewrite_source
 from vyarth.model import Finding, ScanResult
@@ -84,14 +84,6 @@ def code_actions_for(uri: str, lsp_range: dict | None = None) -> list[dict]:
             }
         )
     return actions
-
-
-def project_root(start: Path) -> Path:
-    current = start.resolve()
-    for parent in (current, *current.parents):
-        if (parent / "pyproject.toml").is_file() or (parent / "vyarth.toml").is_file() or (parent / ".git").exists():
-            return parent
-    return current
 
 
 def uri_to_path(uri: str) -> Path:

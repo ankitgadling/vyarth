@@ -7,7 +7,7 @@ vyarth fix [PATH] [options]
 vyarth lsp
 ```
 
-`PATH` defaults to the current directory. When the path is a file, Vyarth scans that file and treats its parent as the project root. Module and dependency checks run only for a directory scan.
+`PATH` defaults to the current directory. When the path is a file, Vyarth scans that file only. The project root is the nearest directory at or above the path that contains `pyproject.toml`, `vyarth.toml`, or `.git`. A subdirectory scan still reads that project's configuration and console scripts, and it only indexes files under the path you named. Module and dependency checks run only for a directory scan.
 
 ## `scan`
 

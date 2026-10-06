@@ -10,6 +10,7 @@ import tomllib
 
 from vyarth.baseline import write_baseline
 from vyarth.config import FAIL_ON_LEVELS, load_config
+from vyarth.discover import project_root
 from vyarth.engine import scan
 from vyarth.fix import apply_fixes
 from vyarth.lsp import serve
@@ -23,9 +24,18 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser = subcommands.add_parser("scan", help="Scan a file or directory")
     _add_scan_arguments(scan_parser)
     baseline_parser = subcommands.add_parser("baseline", help="Write a fingerprint baseline for the current findings")
-    baseline_parser.add_argument("path", nargs="?", default=".")
-    baseline_parser.add_argument("--output", "-o", default="vyarth-baseline.json")
-    baseline_parser.add_argument("--config", default=None)
+    baseline_parser.add_argument("path", nargs="?", default=".", help="File or directory to scan. Default: the current directory.")
+    baseline_parser.add_argument(
+        "--output",
+        "-o",
+        default="vyarth-baseline.json",
+        help="Baseline file to write. A relative path is resolved from the project root. Default: vyarth-baseline.json.",
+    )
+    baseline_parser.add_argument(
+        "--config",
+        default=None,
+        help="Read this TOML file instead of discovering pyproject.toml or vyarth.toml.",
+    )
     fix_parser = subcommands.add_parser("fix", help="Remove safe dead code and rescan")
     _add_scan_arguments(fix_parser)
     subcommands.add_parser("lsp", help="Serve diagnostics over stdin and stdout")
@@ -39,7 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     if not target.exists():
         print(f"path not found: {args.path}", file=sys.stderr)
         return 2
-    root = target.resolve().parent if target.is_file() else target.resolve()
+    requested = target.resolve().parent if target.is_file() else target.resolve()
+    root = project_root(requested)
     try:
         config_path = Path(args.config) if args.config else None
         config = load_config(root, config_path)
@@ -95,17 +106,55 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("path", nargs="?", default=".")
-    parser.add_argument("--format", choices=("text", "json", "sarif", "github"), default="text")
-    parser.add_argument("--config", default=None)
-    parser.add_argument("--min-confidence", type=int, default=None)
-    parser.add_argument("--baseline", default=None)
-    parser.add_argument("--fail-on", choices=tuple(FAIL_ON_LEVELS), default=None)
-    parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--define", action="append", default=None, metavar="NAME=VALUE")
-    parser.add_argument("--changed", action="store_true")
-    parser.add_argument("--changed-from", default="HEAD")
-    parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("path", nargs="?", default=".", help="File or directory to scan. Default: the current directory.")
+    parser.add_argument(
+        "--format",
+        choices=("text", "json", "sarif", "github"),
+        default="text",
+        help="Output format. Default: text.",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Read this TOML file instead of discovering pyproject.toml or vyarth.toml.",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=int,
+        default=None,
+        help="Drop findings below this score. Overrides the config value.",
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help="Report only fingerprints that are not already in this file.",
+    )
+    parser.add_argument(
+        "--fail-on",
+        choices=tuple(FAIL_ON_LEVELS),
+        default=None,
+        help="Exit 1 only when a printed finding is at or above 90, 70, or 0.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Process pool size. 1 stays in-process. 0 uses the CPU count. Overrides the config value.",
+    )
+    parser.add_argument(
+        "--define",
+        action="append",
+        default=None,
+        metavar="NAME=VALUE",
+        help="Fold this name as a constant. Repeat the flag for more names.",
+    )
+    parser.add_argument(
+        "--changed",
+        action="store_true",
+        help="Index the project, then keep findings only in Python files changed against git.",
+    )
+    parser.add_argument("--changed-from", default="HEAD", help="Git ref for --changed. Default: HEAD.")
+    parser.add_argument("--no-cache", action="store_true", help="Reparse every file. The cache lives in .vyarth/cache.")
 
 
 def _run_scan(target: Path, root: Path, config, args, defines: dict[str, str]):

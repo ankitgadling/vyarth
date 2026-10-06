@@ -172,6 +172,14 @@ def test_all_reexport_counts_as_a_use(tmp_path):
     assert not any(finding.symbol == "run" for finding in result.findings)
 
 
+def test_dev_extra_tools_are_importable():
+    import mypy
+    import ruff
+
+    assert mypy.__name__ == "mypy"
+    assert ruff.__name__ == "ruff"
+
+
 def test_scanning_this_package_does_not_flag_its_public_api():
     root = Path(__file__).resolve().parents[1]
     result = scan(root)

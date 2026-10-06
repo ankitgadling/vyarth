@@ -121,6 +121,25 @@ def test_pyproject_script_keeps_the_call_graph_alive(tmp_path):
     assert scan(tmp_path).findings == ()
 
 
+def test_src_scan_reads_parent_console_scripts(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                '[project]\nname = "demo"\nversion = "0.1"\n\n'
+                '[project.entry-points.console_scripts]\n'
+                'demo = "pkg.cli:main"\n'
+            ),
+            "other.py": "def outside():\n    return 1\n",
+            "src/pkg/__init__.py": "",
+            "src/pkg/cli.py": "def main():\n    return helper()\n\ndef helper():\n    return 1\n",
+        },
+    )
+    result = scan(tmp_path / "src")
+    assert result.files_scanned == 2
+    assert result.findings == ()
+
+
 def test_a_test_import_keeps_the_module_alive(tmp_path):
     write_tree(
         tmp_path,

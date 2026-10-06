@@ -145,6 +145,34 @@ def test_uncalled_lambda_does_not_reach_callee(tmp_path):
     assert _named(result, "used") == []
 
 
+def test_lambda_load_keeps_an_import_and_a_variable(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "import sqlite3\n"
+        "from datetime import datetime\n"
+        "\n"
+        "def unused():\n"
+        "    return 1\n"
+        "\n"
+        "offset = 1\n"
+        "sqlite3.register_converter(\n"
+        "    'timestamp',\n"
+        "    lambda value: datetime.fromisoformat(value.decode()) + offset,\n"
+        ")\n"
+        "handler = lambda: unused()\n",
+        encoding="utf-8",
+    )
+    result = scan(tmp_path)
+    symbols = {(finding.rule, finding.symbol) for finding in result.findings}
+    assert ("UNUSED_IMPORT", "datetime") not in symbols
+    assert ("UNUSED_VARIABLE", "offset") not in symbols
+    assert ("UNUSED_FUNCTION", "unused") in symbols
+    apply_fixes(tmp_path, result.findings)
+    text = path.read_text(encoding="utf-8")
+    assert "datetime" in text
+    assert "offset" in text
+
+
 def test_file_getattr_keeps_unrelated_dead_functions(tmp_path):
     write_tree(
         tmp_path,

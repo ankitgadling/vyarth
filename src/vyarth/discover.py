@@ -4,20 +4,34 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 import pathspec
 
 from vyarth.config import TEST_PATTERNS, Config
 
 
-def discover_files(root: Path, config: Config) -> list[Path]:
-    """Return Python files under `root`, skipping excludes and `.gitignore`."""
+def project_root(start: Path) -> Path:
+    """Nearest directory at or above `start` that holds the project file or a git checkout."""
+    current = start.resolve()
+    for parent in (current, *current.parents):
+        if (parent / "pyproject.toml").is_file() or (parent / "vyarth.toml").is_file() or (parent / ".git").exists():
+            return parent
+    return current
+
+
+def discover_files(root: Path, config: Config, *, within: Path | None = None) -> list[Path]:
+    """Return Python files under `within` or `root`, skipping excludes and `.gitignore`.
+
+    Excludes and `.gitignore` are matched on paths relative to `root`. `within` limits
+    the walk when the caller asked to scan a subdirectory of the project.
+    """
     root = root.resolve()
+    start = root if within is None else within.resolve()
     exclude_spec = pathspec.GitIgnoreSpec.from_lines(config.excludes)
     gitignore = _load_gitignore(root)
     found: list[Path] = []
-    for dirpath, dirnames, filenames in os_walk(root):
+    for dirpath, dirnames, filenames in os_walk(start):
         directory = Path(dirpath)
         kept: list[str] = []
         for name in dirnames:
@@ -75,7 +89,12 @@ def module_names(path: Path, roots: list[Path]) -> list[str]:
     return names
 
 
-_Index = TypeVar("_Index")
+class _HasPath(Protocol):
+    @property
+    def path(self) -> str: ...
+
+
+_Index = TypeVar("_Index", bound=_HasPath)
 
 
 def indexes_by_module(indexes: list[_Index], roots: list[Path]) -> dict[str, _Index]:

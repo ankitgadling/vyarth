@@ -152,8 +152,8 @@ def _render(node: ast.Import | ast.ImportFrom, symbols: set[str]) -> str | None:
     return f"from {dots}{module} import " + ", ".join(parts)
 
 
-def _pure_import(source: str, node: ast.AST) -> bool:
-    end = getattr(node, "end_lineno", None) or node.lineno
+def _pure_import(source: str, node: ast.Import | ast.ImportFrom) -> bool:
+    end = node.end_lineno or node.lineno
     segment = set(range(node.lineno, end + 1))
     chunk = source.splitlines()[node.lineno - 1 : end]
     if any(";" in line for line in chunk):
@@ -183,8 +183,8 @@ def _pure_import(source: str, node: ast.AST) -> bool:
     return True
 
 
-def _trailing_comment(source: str, node: ast.AST) -> str:
-    end = getattr(node, "end_lineno", None) or node.lineno
+def _trailing_comment(source: str, node: ast.Import | ast.ImportFrom) -> str:
+    end = node.end_lineno or node.lineno
     try:
         tokens = tokenize.generate_tokens(StringIO(source).readline)
     except (tokenize.TokenError, IndentationError, SyntaxError):
@@ -365,11 +365,11 @@ def _statement_at(tree: ast.AST, line: int) -> ast.stmt | None:
     return found
 
 
-def _private_span(node: ast.AST, parents: dict[ast.AST, ast.AST], source: str) -> bool:
+def _private_span(node: ast.stmt, parents: dict[ast.AST, ast.AST], source: str) -> bool:
     parent = parents.get(node)
-    if parent is not None and getattr(parent, "lineno", None) == getattr(node, "lineno", None):
+    if parent is not None and getattr(parent, "lineno", None) == node.lineno:
         return False
-    end = getattr(node, "end_lineno", None) or node.lineno
+    end = node.end_lineno or node.lineno
     chunk = source.splitlines()[node.lineno - 1 : end]
     return all(";" not in line for line in chunk)
 

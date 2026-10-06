@@ -1,9 +1,9 @@
 """Regressions for analysis bugs found in review."""
 
 from vyarth import scan
-from vyarth.fix import apply_fixes, apply_import_fixes
+from vyarth.fix import apply_fixes, apply_import_fixes, rewrite_source
 from vyarth.incremental import cache_stamp
-from vyarth.model import INDEX_VERSION
+from vyarth.model import INDEX_VERSION, Finding
 
 from tests.conftest import write_tree
 
@@ -308,6 +308,30 @@ def test_fix_removes_every_name_in_a_parenthesized_import(tmp_path):
     assert len(notes) == 2
 
 
+def test_quoted_annotation_keeps_a_type_checking_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        'rate: "Decimal"\n'
+        "\n"
+        "def price(value: \"list['Decimal']\") -> \"Decimal\":\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    result = scan(tmp_path)
+    unused = {finding.symbol for finding in result.findings if finding.rule == "UNUSED_IMPORT"}
+    assert "Decimal" not in unused
+    assert "Fraction" in unused
+    apply_fixes(tmp_path, result.findings)
+    text = path.read_text(encoding="utf-8")
+    assert "from decimal import Decimal" in text
+    assert "Fraction" not in text
+
+
 def test_fix_leaves_an_import_that_might_be_dynamic(tmp_path):
     path = tmp_path / "app.py"
     path.write_text(
@@ -596,3 +620,105 @@ def test_fix_removes_unreachable_code_nested_functions_and_plain_locals(tmp_path
     assert "left = 2" not in text
     assert "kept = len('x')" in text
     assert notes
+
+
+def _finding(**overrides) -> Finding:
+    data = {
+        "rule": "UNUSED_IMPORT",
+        "path": "app.py",
+        "line": 1,
+        "column": 1,
+        "symbol": "os",
+        "status": "DEAD",
+        "confidence": 100,
+        "message": "",
+        "evidence": (),
+        "fingerprint": "UNUSED_IMPORT:app.py:os",
+    }
+    data.update(overrides)
+    return Finding(**data)
+
+
+def test_fix_leaves_star_and_semicolon_imports():
+    star = "from os import *\n"
+    updated, notes = rewrite_source(star, [_finding(symbol="*")], "app.py")
+    assert updated == star
+    assert notes == []
+    mixed = "import os; import sys\n"
+    updated, notes = rewrite_source(mixed, [_finding(symbol="os")], "app.py")
+    assert updated == mixed
+    assert notes == []
+
+
+def test_fix_keeps_a_trailing_import_comment():
+    source = "from os import path, getcwd  # keep me\nprint(getcwd())\n"
+    updated, notes = rewrite_source(source, [_finding(symbol="path", line=1)], "app.py")
+    assert updated == "from os import getcwd  # keep me\nprint(getcwd())\n"
+    assert notes == ["fixed app.py:1 path"]
+
+
+def test_fix_removes_an_annotated_assignment(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def outer():\n"
+        "    value: int = 1\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    outer()\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    text = path.read_text(encoding="utf-8")
+    assert "value: int = 1" not in text
+    assert "return 0" in text
+
+
+def test_fix_replaces_a_fully_dead_suite_with_pass(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def outer():\n"
+        "    if False:\n"
+        "        left = 1\n"
+        "        right = 2\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    outer()\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    text = path.read_text(encoding="utf-8")
+    assert "left" not in text
+    assert "right" not in text
+    assert "pass" in text
+    assert text.count("pass") == 1
+
+
+def test_fix_ignores_a_syntax_error_and_a_missing_file(tmp_path):
+    source = "def (\n"
+    assert rewrite_source(source, [_finding()], "app.py") == (source, [])
+    notes = apply_fixes(tmp_path, [_finding(path="missing.py")])
+    assert notes == []
+    assert not (tmp_path / "missing.py").exists()
+
+
+def test_overlapping_fix_edits_apply_once(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def outer():\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "        left = 2\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    outer()\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    text = path.read_text(encoding="utf-8")
+    assert "left" not in text
+    assert "def helper" in text
+    assert "return 0" in text
+    compile(text, "app.py", "exec")

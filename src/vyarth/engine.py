@@ -12,7 +12,7 @@ from vyarth.baseline import filter_baselined, load_baseline
 from vyarth.confidence import apply_confidence
 from vyarth.config import Config, load_config
 from vyarth.dependencies import dependency_findings
-from vyarth.discover import discover_files, is_test_path, relative_posix
+from vyarth.discover import discover_files, is_test_path, project_root, relative_posix
 from vyarth.duplicates import duplicate_findings
 from vyarth.ignore import apply_ignores
 from vyarth.incremental import cache_stamp, changed_python_files, load_cached, store_cached
@@ -47,7 +47,8 @@ def scan(
     if not target.exists():
         raise FileNotFoundError(path)
     single_file = target.is_file()
-    root = target.parent if single_file else target
+    requested = target.parent if single_file else target
+    root = project_root(requested)
     if config is None:
         explicit = Path(config_path) if config_path is not None else None
         config = load_config(root, explicit)
@@ -61,7 +62,7 @@ def scan(
             return ScanResult(findings=(), errors=(), files_scanned=0)
 
     _status(progress, "finding python files")
-    files = [target] if single_file else discover_files(root, config)
+    files = [target] if single_file else discover_files(root, config, within=requested)
     fold = config.fold_map()
     if defines:
         fold.update(defines)
@@ -132,8 +133,8 @@ def _index_files(
     jobs = [
         (path, relpath, source, fold_pairs, duplicate_min_statements) for path, relpath, source, _, _ in pending
     ]
+    produced: list[tuple[str, FileIndex | ParseError] | None] = []
     if worker_count <= 1 or len(jobs) < _POOL_MIN_FILES:
-        produced = []
         for index, job in enumerate(jobs, start=1):
             produced.append(_index_job(job))
             done = cached_count + index
@@ -152,12 +153,13 @@ def _index_files(
         if item is None:
             continue
         kind, payload = item
-        if kind == "error":
-            errors.append(payload)  # type: ignore[arg-type]
+        if kind == "error" and isinstance(payload, ParseError):
+            errors.append(payload)
             continue
-        indexes.append(payload)  # type: ignore[arg-type]
-        if use_cache and stamp and not overlaid:
-            store_cached(root, relpath, stamp, payload)  # type: ignore[arg-type]
+        if isinstance(payload, FileIndex):
+            indexes.append(payload)
+            if use_cache and stamp and not overlaid:
+                store_cached(root, relpath, stamp, payload)
     return indexes, errors
 
 

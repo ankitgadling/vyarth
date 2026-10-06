@@ -4,7 +4,7 @@ A scan indexes every Python file, decides which modules an entry point can impor
 
 ## What gets indexed
 
-The walk starts at the scan root, skips the built-in excludes and `.gitignore`, and skips `exclude` patterns from config. Test modules stay in the index. Their findings are removed after scoring, so a test that calls `app.service.run` keeps `run` alive.
+File discovery starts at the directory you named, so `vyarth scan src` does not index the rest of the repository. The project root is the nearest ancestor that contains `pyproject.toml`, `vyarth.toml`, or `.git`. Configuration, console scripts, and finding paths come from that root. The walk skips the built-in excludes and `.gitignore`, and skips `exclude` patterns from config. Test modules stay in the index. Their findings are removed after scoring, so a test that calls `app.service.run` keeps `run` alive.
 
 Each file is parsed with the standard library `ast` module. The index records:
 
@@ -14,7 +14,7 @@ Each file is parsed with the standard library `ast` module. The index records:
 - decorators
 - class bases
 - assignments of functions into lists, tuples, and attributes
-- return annotations
+- return annotations, including a quoted forward reference such as `"Decimal"`
 - a structural hash of each function body
 - string literals passed to `getattr`, `setattr`, `eval`, `exec`, and `importlib`
 
@@ -27,7 +27,7 @@ A module is an entry when any of these is true:
 - its path matches an entry pattern (`**/__main__.py`, `**/wsgi.py`, `**/asgi.py`, `**/manage.py`, unless you replace the list)
 - it contains `if __name__ == "__main__":`
 - it is a test module
-- `[project.scripts]` or `[project.gui-scripts]` names it
+- `[project.scripts]`, `[project.gui-scripts]`, or an entry-points group named `console_scripts` or `gui_scripts` names it
 - `entry_points` in config names it
 
 A symbol is an entry when:
@@ -88,6 +88,7 @@ After the symbol rules, a directory scan reads dependency manifests and reports 
 These are outside what the current indexer proves:
 
 - A string built at runtime and passed to `getattr` or `importlib` is invisible. Only literal names lower confidence.
+- A name loaded inside a lambda counts as a use, so an import or variable used only there is kept. A function or class that the lambda would call does not count until something calls the lambda.
 - `assert` is not an exit, so code after a failing assert is still treated as live.
 - An unresolved attribute call does not match a specific class. It only lowers the score of that method name.
 - Fuzzy clone detection is not implemented. Duplicates are exact structural matches.

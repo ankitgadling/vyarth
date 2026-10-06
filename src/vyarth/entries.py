@@ -120,16 +120,23 @@ def _pyproject_scripts(root: Path) -> list[tuple[str, str]]:
         return []
     found: list[tuple[str, str]] = []
     for key in ("scripts", "gui-scripts"):
-        table = project.get(key, {})
-        if not isinstance(table, dict):
-            continue
-        for value in table.values():
-            if not isinstance(value, str):
-                continue
-            parsed = _parse_entrypoint(value)
-            if parsed is not None:
-                found.append(parsed)
+        _collect_scripts(project.get(key, {}), found)
+    entry_points = project.get("entry-points", {})
+    if isinstance(entry_points, dict):
+        for key in ("console_scripts", "gui_scripts"):
+            _collect_scripts(entry_points.get(key, {}), found)
     return found
+
+
+def _collect_scripts(table: object, found: list[tuple[str, str]]) -> None:
+    if not isinstance(table, dict):
+        return
+    for value in table.values():
+        if not isinstance(value, str):
+            continue
+        parsed = _parse_entrypoint(value)
+        if parsed is not None:
+            found.append(parsed)
 
 
 def _parse_entrypoint(value: str) -> tuple[str, str] | None:

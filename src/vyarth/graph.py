@@ -47,18 +47,18 @@ def reachable_modules(project: Project, entries: EntrySet, config: Config) -> se
         for index in project.indexes:
             relpath = relative_posix(Path(index.path), project.root)
             if ignored.match_file(relpath):
-                name = module_name(Path(index.path), project.roots)
-                if name is not None:
-                    seeds.add(name)
+                dotted = module_name(Path(index.path), project.roots)
+                if dotted is not None:
+                    seeds.add(dotted)
     seen = _with_parents(seeds)
     queue = list(seen)
     while queue:
         name = queue.pop()
-        index = project.by_module.get(name)
-        if index is None:
+        module_index = project.by_module.get(name)
+        if module_index is None:
             continue
-        path = Path(index.path)
-        for edge in index.imports:
+        path = Path(module_index.path)
+        for edge in module_index.imports:
             for used in modules_used_by(edge.module, edge.level, edge.imported_name, path, project.roots):
                 _reach(used, seen, queue, aliases)
     return seen
@@ -219,20 +219,20 @@ def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[s
 
     def add(path: str, qualname: str) -> None:
         if qualname.startswith("@lambda:"):
-            marker = (path, qualname)
-            if marker in queued:
+            queued_marker = (path, qualname)
+            if queued_marker in queued:
                 return
-            queued.add(marker)
-            queue.append(marker)
+            queued.add(queued_marker)
+            queue.append(queued_marker)
             return
-        marker = _marker(path, qualname)
-        if marker is None:
+        resolved = _marker(path, qualname)
+        if resolved is None:
             return
-        reachable.add(marker)
-        if marker in queued:
+        reachable.add(resolved)
+        if resolved in queued:
             return
-        queued.add(marker)
-        queue.append(marker)
+        queued.add(resolved)
+        queue.append(resolved)
 
     def touch(path: str, qualname: str) -> None:
         """Mark a stored function used without walking its body."""

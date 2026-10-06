@@ -8,8 +8,10 @@ The user guide is in [docs/index.md](docs/index.md): the command line, configura
 
 ## Install
 
+Vyarth is not published on PyPI yet. From a checkout of this repository:
+
 ```bash
-pip install vyarth
+pip install .
 ```
 
 Requires Python 3.11 or newer. Release notes are in `CHANGELOG.md`.

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from tests.conftest import write_tree
 from vyarth.cli import main
 
@@ -45,6 +47,20 @@ def test_clean_file_exits_zero(tmp_path, capsys):
 def test_missing_path_exits_two(tmp_path, capsys):
     assert main(["scan", str(tmp_path / "missing.py")]) == 2
     assert "path not found" in capsys.readouterr().err
+
+
+def test_scan_help_describes_the_options(capsys):
+    with pytest.raises(SystemExit) as caught:
+        main(["scan", "--help"])
+    assert caught.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Output format" in text
+    assert "Drop findings below this score" in text
+    assert "Exit 1 only when a printed finding" in text
+    assert "Fold this name as a constant" in text
+    assert "keep findings only in Python files changed against git" in text
+    assert "Reparse every file" in text
+    assert "pyproject.toml or vyarth.toml" in text
 
 
 def test_min_confidence_flag(tmp_path, capsys):

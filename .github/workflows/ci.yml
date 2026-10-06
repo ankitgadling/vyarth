@@ -18,6 +18,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests
+      - name: Typecheck
+        run: mypy
       - name: Test
         run: pytest
 
