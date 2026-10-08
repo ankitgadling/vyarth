@@ -13,6 +13,21 @@ from vyarth.model import Binding
 from vyarth.project import Project
 
 
+_DJANGO_PATTERNS = (
+    "**/settings.py",
+    "**/admin.py",
+    "**/apps.py",
+    "**/urls.py",
+    "**/migrations/*.py",
+)
+_PYDANTIC_DECORATORS = (
+    "validator",
+    "field_validator",
+    "model_validator",
+    "computed_field",
+    "field_serializer",
+    "model_serializer",
+)
 _ENTRY_SUFFIXES = frozenset(
     {
         "route",
@@ -41,7 +56,13 @@ class EntrySet:
 def collect_entries(project: Project, config: Config) -> EntrySet:
     symbols: set[tuple[str, str]] = set()
     modules: set[str] = set()
-    entry_files = pathspec.GitIgnoreSpec.from_lines(config.entry_patterns)
+    patterns = list(config.entry_patterns)
+    if "django" in config.frameworks:
+        patterns.extend(_DJANGO_PATTERNS)
+    entry_files = pathspec.GitIgnoreSpec.from_lines(patterns)
+    decorator_names = config.framework_decorators + config.ignore_decorators
+    if "pydantic" in config.frameworks:
+        decorator_names = decorator_names + _PYDANTIC_DECORATORS
     for module_name_text, qualname in _configured_symbols(project.root, config):
         modules.add(module_name_text)
         index = project.by_module.get(module_name_text)
@@ -63,17 +84,30 @@ def collect_entries(project: Project, config: Config) -> EntrySet:
             decorated.setdefault(item.qualname, []).append(item.name)
         for binding in index.bindings:
             names = decorated.get(binding.qualname, [])
-            if _symbol_is_entry(binding, names, config, relpath):
+            if _symbol_is_entry(binding, names, config, relpath, decorator_names):
                 symbols.add((index.path, binding.qualname))
                 if dotted and binding.scope_kind == "module":
                     modules.add(dotted)
+            elif _framework_value(binding, config):
+                symbols.add((index.path, binding.qualname))
+    symbols.update(_base_symbols(project, config))
     return EntrySet(symbols=frozenset(symbols), modules=frozenset(modules))
 
 
-def _symbol_is_entry(binding: Binding, decorator_names: list[str], config: Config, relpath: str) -> bool:
+def _symbol_is_entry(
+    binding: Binding,
+    decorator_names: list[str],
+    config: Config,
+    relpath: str,
+    extra_decorators: tuple[str, ...],
+) -> bool:
     if binding.kind not in {"function", "class"}:
         return False
-    if any(is_entry_decorator(name, config.framework_decorators) for name in decorator_names):
+    if any(is_entry_decorator(name, extra_decorators) for name in decorator_names):
+        return True
+    if binding.scope_kind == "module" and binding.kind == "function" and binding.name.startswith("pytest_"):
+        return True
+    if "django" in config.frameworks and binding.kind == "class" and binding.name == "Meta":
         return True
     if binding.scope_kind == "module" and binding.kind == "function" and binding.name in {"lambda_handler"}:
         return True
@@ -84,6 +118,42 @@ def _symbol_is_entry(binding: Binding, decorator_names: list[str], config: Confi
     if is_test_path(relpath) and binding.kind == "function" and binding.name.startswith("test_"):
         return True
     return False
+
+
+def _framework_value(binding: Binding, config: Config) -> bool:
+    if binding.scope_kind != "module" or binding.kind != "variable":
+        return False
+    if "django" in config.frameworks and binding.name == "urlpatterns":
+        return True
+    return "celery" in config.frameworks and binding.name == "beat_schedule"
+
+
+def _base_symbols(project: Project, config: Config) -> set[tuple[str, str]]:
+    if not config.ignore_bases:
+        return set()
+    found: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        matched: set[str] = set()
+        for class_name, bases in index.class_bases:
+            if any(_base_matches(base, config.ignore_bases) for base in bases):
+                matched.add(class_name)
+        if not matched:
+            continue
+        for binding in index.bindings:
+            owner = binding.qualname.split(".", 1)[0]
+            if binding.qualname in matched or owner in matched:
+                found.add((index.path, binding.qualname))
+    return found
+
+
+def _base_matches(base: str, names: tuple[str, ...]) -> bool:
+    leaf = base
+    if leaf.startswith("@expr:"):
+        leaf = leaf[len("@expr:") :]
+    elif leaf.startswith("@import:"):
+        leaf = leaf[len("@import:") :]
+    leaf = leaf.rsplit(".", 1)[-1]
+    return leaf in names or base in names
 
 
 def is_entry_decorator(name: str, extras: tuple[str, ...]) -> bool:

@@ -15,23 +15,42 @@ from vyarth.fix import is_fixable, rewrite_source
 from vyarth.model import Finding, ScanResult
 
 
-_results: dict[Path, tuple[tuple[tuple[str, int, int], ...], ScanResult]] = {}
 _buffers: dict[Path, str] = {}
+_scan_cache: dict[tuple[object, ...], ScanResult] = {}
+_file_lists: dict[Path, list[Path]] = {}
 
 
 def serve(stdin=None, stdout=None) -> None:
     reader = stdin if stdin is not None else sys.stdin
     writer = stdout if stdout is not None else sys.stdout
     while True:
-        message = _read_message(reader)
+        try:
+            message = _read_message(reader)
+        except ValueError as exc:
+            _write_message(writer, _error(None, -32700, str(exc)))
+            continue
         if message is None:
             return
         method = message.get("method", "")
         if method == "exit":
             return
-        response = _dispatch(message)
+        try:
+            response = _dispatch(message)
+        except Exception as exc:
+            print(f"vyarth lsp: {exc}", file=sys.stderr)
+            if message.get("id") is not None:
+                _write_message(writer, _error(message.get("id"), -32603, str(exc)))
+            continue
         if response is not None:
             _write_message(writer, response)
+        if method in {"textDocument/didOpen", "textDocument/didChange", "textDocument/didSave"}:
+            uri = _document_uri(message)
+            if not uri:
+                continue
+            try:
+                _write_message(writer, _publish(uri))
+            except Exception as exc:
+                print(f"vyarth lsp: {exc}", file=sys.stderr)
 
 
 def diagnostics_for(uri: str) -> dict:
@@ -132,25 +151,43 @@ def _dispatch(message: dict) -> dict | None:
 def _scanned(uri: str) -> tuple[Path, str, str, ScanResult] | None:
     path = uri_to_path(uri)
     root = project_root(path if path.is_dir() else path.parent)
-    if not path.is_file():
+    if not path.is_file() and path.resolve() not in _buffers:
         return None
     resolved = path.resolve()
     text = _buffers.get(resolved)
     stamp = _file_stamp(root)
-    cached = _results.get(root)
-    if text is None and cached is not None and cached[0] == stamp:
-        result = cached[1]
-    else:
-        overlays = {str(resolved): text} if text is not None else None
-        result = scan(root, overlays=overlays)
-        if text is None:
-            _results[root] = (stamp, result)
+    overlays = _overlays(root)
+    key = (root, overlays, stamp)
+    result = _scan_cache.get(key)
+    if result is None:
+        result = scan(root, overlays=dict(overlays) or None)
+        _scan_cache[key] = result
+        if len(_scan_cache) > 8:
+            _scan_cache.pop(next(iter(_scan_cache)))
     try:
         relpath = relative_posix(path, root)
     except ValueError:
         relpath = path.name
-    source = text if text is not None else path.read_text(encoding="utf-8")
+    if text is None:
+        if not path.is_file():
+            return None
+        source = path.read_text(encoding="utf-8")
+    else:
+        source = text
     return path, relpath, source, result
+
+
+def _overlays(root: Path) -> tuple[tuple[str, str], ...]:
+    found: list[tuple[str, str]] = []
+    for path, text in _buffers.items():
+        try:
+            if project_root(path.parent) != root and path.parent != root:
+                continue
+        except OSError:
+            continue
+        found.append((str(path), text))
+    found.sort()
+    return tuple(found)
 
 
 def _covers(line: int, lsp_range: dict) -> bool:
@@ -192,11 +229,21 @@ def _span_edit(source: str, updated: str) -> dict:
     }
 
 
-def _file_stamp(root: Path) -> tuple[tuple[str, int, int], ...]:
-    config = load_config(root)
+def _file_stamp(root: Path, *, refresh: bool = False) -> tuple[tuple[str, int, int], ...]:
+    if refresh:
+        _file_lists.pop(root, None)
+    files = _file_lists.get(root)
+    if files is None:
+        files = discover_files(root, load_config(root))
+        _file_lists[root] = files
     stamps: list[tuple[str, int, int]] = []
-    for file in discover_files(root, config):
-        stat = file.stat()
+    for file in files:
+        try:
+            stat = file.stat()
+        except OSError:
+            if refresh:
+                continue
+            return _file_stamp(root, refresh=True)
         stamps.append((relative_posix(file, root), stat.st_size, stat.st_mtime_ns))
     return tuple(stamps)
 
@@ -207,8 +254,10 @@ def _remember_buffer(message: dict) -> None:
     uri = document.get("uri") or ""
     if not uri:
         return
-    text = params.get("text")
-    if text is None:
+    text = document.get("text")
+    if not isinstance(text, str):
+        text = params.get("text")
+    if not isinstance(text, str):
         changes = params.get("contentChanges") or []
         if changes and isinstance(changes[-1], dict):
             text = changes[-1].get("text")
@@ -221,8 +270,32 @@ def _forget_buffer(message: dict) -> None:
     params = message.get("params") or {}
     document = params.get("textDocument") or {}
     uri = document.get("uri") or ""
-    if uri:
-        _buffers.pop(uri_to_path(uri).resolve(), None)
+    if not uri:
+        return
+    path = uri_to_path(uri).resolve()
+    _buffers.pop(path, None)
+    root = project_root(path.parent)
+    _file_lists.pop(root, None)
+
+
+def _document_uri(message: dict) -> str:
+    params = message.get("params") or {}
+    document = params.get("textDocument") or {}
+    uri = document.get("uri") or ""
+    return uri if isinstance(uri, str) else ""
+
+
+def _publish(uri: str) -> dict:
+    payload = diagnostics_for(uri)
+    return {
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "diagnostics": payload["items"]},
+    }
+
+
+def _error(request_id: object, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
 def _result(request_id: object, result: object) -> dict:
@@ -244,9 +317,12 @@ def _read_message(stream) -> dict | None:
     if length <= 0:
         return None
     body = reader.read(length)
-    payload = json.loads(body.decode("utf-8"))
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(str(exc)) from exc
     if not isinstance(payload, dict):
-        return None
+        raise ValueError("message must be a JSON object")
     return payload
 
 

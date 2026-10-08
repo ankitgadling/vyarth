@@ -4,7 +4,7 @@ A scan indexes every Python file, decides which modules an entry point can impor
 
 ## What gets indexed
 
-File discovery starts at the directory you named, so `vyarth scan src` does not index the rest of the repository. The project root is the nearest ancestor that contains `pyproject.toml`, `vyarth.toml`, or `.git`. Configuration, console scripts, and finding paths come from that root. The walk skips the built-in excludes and `.gitignore`, and skips `exclude` patterns from config. Test modules stay in the index. Their findings are removed after scoring, so a test that calls `app.service.run` keeps `run` alive.
+File discovery starts at the directory you named, so `vyarth scan src` does not index the rest of the repository. The project root is the nearest ancestor that contains `pyproject.toml`, `vyarth.toml`, or `.git`. Configuration, console scripts, and finding paths come from that root. The walk skips the built-in excludes, the root `.gitignore`, `.git/info/exclude`, and each nested `.gitignore`, and it skips `exclude` patterns from config. A nested ignore file applies under its directory, and a later rule wins. Test modules, including `conftest.py`, stay in the index. Their findings are removed after scoring, so a test that calls `app.service.run` keeps `run` alive.
 
 Each file is parsed with the standard library `ast` module. The index records:
 
@@ -26,16 +26,20 @@ A module is an entry when any of these is true:
 
 - its path matches an entry pattern (`**/__main__.py`, `**/wsgi.py`, `**/asgi.py`, `**/manage.py`, `setup.py`, `**/docs/conf.py`, unless you replace the list)
 - it contains `if __name__ == "__main__":`
-- it is a test module
+- it is a test module, including `conftest.py`
 - `[project.scripts]`, `[project.gui-scripts]`, or an entry-points group named `console_scripts` or `gui_scripts` names it
 - `entry_points` in config names it
+- `frameworks` includes `django` and the path is `settings.py`, `admin.py`, `apps.py`, `urls.py`, or a file under `migrations/`
 
 A symbol is an entry when:
 
-- it is decorated with a framework hook
-- it is a module-level function named `lambda_handler`
+- it is decorated with a framework hook, a name in `ignore_decorators`, or a Pydantic hook when `frameworks` includes `pydantic`
+- it is a module-level function named `lambda_handler`, or whose name starts with `pytest_`
 - its name starts with `test_`
 - it is a method named `ready`
+- `frameworks` includes `django` and it is a class named `Meta`, or a module-level name `urlpatterns`
+- `frameworks` includes `celery` and it is a module-level name `beat_schedule`
+- its class has a base listed in `ignore_bases`, which also covers that class’s methods and attributes
 
 The built-in decorator hooks, matched on the final attribute, are `route`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `task`, `shared_task`, `command`, `group`, and `fixture`. `framework_decorators` adds more names. `@property`, `@staticmethod`, `@classmethod`, and the abstract-method decorators are recorded and are not entries by themselves.
 
@@ -73,11 +77,13 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Decorated, and the decorator is not an entry | 75 |
 | The name appears as a string in `getattr`, `setattr`, `eval`, or `exec` | 70 |
 | The file calls `importlib` or `__import__` | unused imports in that file drop to 70 |
+| Unused import in `__init__.py` | 70, as a possible public re-export |
+| Unused dotted `import pkg.sub` | 70, because the import may run the submodule for its side effects |
 | Any file in the project imports dynamically | unused modules drop to 60 |
 | Referenced, but no entry reaches the reference | 80, or 60 if an unresolved attribute call uses the name |
 | Duplicate body | 90 |
 
-Findings in an unused module, other than unreachable code, are capped at the module’s score.
+Findings in an unused module, other than unreachable code, are capped at the module’s score. A `DEAD` finding that this cap, or the Alembic adjustment, lowers below 100 becomes `POSSIBLY_DEAD`.
 
 ## Dependencies and duplicates
 

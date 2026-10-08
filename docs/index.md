@@ -69,4 +69,4 @@ print(result.to_json())
 | Baselines, SARIF, and GitHub Actions | [Continuous integration](continuous-integration.md) |
 | Automatic rewrites and the language server | [Fix and editor](fix-and-editor.md) |
 | Entries, reachability, and known limits | [How analysis works](how-analysis-works.md) |
-| Counts against Vulture on Flask and requests | [Comparison](comparison.md) |
+| Counts against Vulture, deadcode, and dead | [Comparison](comparison.md) |

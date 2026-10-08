@@ -14,8 +14,8 @@ from vyarth.dependencies import dependency_findings
 from vyarth.discover import discover_files, is_test_path, project_root, relative_posix
 from vyarth.duplicates import duplicate_findings
 from vyarth.ignore import apply_ignores
-from vyarth.incremental import cache_stamp, changed_python_files, load_cached, store_cached
-from vyarth.model import FileIndex, ParseError, ScanResult
+from vyarth.incremental import cache_stamp, changed_python_files, load_cached, prune_cache, store_cached
+from vyarth.model import FileIndex, Finding, ParseError, ScanResult
 from vyarth.progress import ScanProgress
 from vyarth.python_index import PythonAstBackend
 from vyarth.rules import collect_findings
@@ -23,6 +23,10 @@ from vyarth.rules import collect_findings
 
 # Spawning a process pool costs more than parsing a few modules, especially on Windows.
 _POOL_MIN_FILES = 8
+
+
+class BaselineNotFoundError(FileNotFoundError):
+    """The baseline file named by config or `--baseline` does not exist."""
 
 
 def scan(
@@ -80,7 +84,7 @@ def scan(
     findings = collect_findings(indexes, root, config, check_modules=not single_file, progress=progress)
     _status(progress, "checking dependencies")
     if not single_file:
-        dep_findings, dep_errors = dependency_findings(indexes, root, within=requested)
+        dep_findings, dep_errors = dependency_findings(indexes, root, within=requested, config=config)
         findings.extend(dep_findings)
         errors.extend(dep_errors)
     _status(progress, "checking duplicate code")
@@ -94,6 +98,8 @@ def scan(
     if report_only is not None:
         findings = [finding for finding in findings if finding.path in report_only]
     findings.sort(key=lambda finding: (finding.path, finding.line, finding.column, finding.rule, finding.symbol))
+    if use_cache and not single_file and requested == root and not overlays:
+        prune_cache(root, {index.path for index in indexes})
     return ScanResult(findings=tuple(findings), errors=tuple(errors), files_scanned=len(indexes))
 
 
@@ -196,12 +202,12 @@ def _index_job(
 
 
 def _apply_baseline(
-    findings: list,
+    findings: list[Finding],
     root: Path,
     config: Config,
     baseline: str | Path | None,
     apply_baseline: bool,
-) -> list:
+) -> list[Finding]:
     if not apply_baseline:
         return findings
     chosen = baseline if baseline is not None else config.baseline
@@ -211,7 +217,7 @@ def _apply_baseline(
     if not path.is_absolute():
         path = root / path
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise BaselineNotFoundError(path)
     return filter_baselined(findings, load_baseline(path))
 
 

@@ -3,8 +3,25 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from vyarth.model import Finding, ScanResult
+
+
+_HELP_URI = "https://github.com/ankitgadling/vyarth/blob/main/docs/rules.md"
+_INFORMATION_URI = "https://github.com/ankitgadling/vyarth"
+_RULE_TEXT = {
+    "UNUSED_IMPORT": "An imported name is never used.",
+    "UNUSED_FUNCTION": "A function or method is never used.",
+    "UNUSED_CLASS": "A class is never used.",
+    "UNUSED_VARIABLE": "A variable is never used.",
+    "UNREACHABLE_CODE": "A statement never runs.",
+    "POSSIBLY_UNUSED_MODULE": "No entry point imports this module.",
+    "WILDCARD_IMPORT": "A wildcard import limits analysis.",
+    "ORPHAN_FUNCTION": "A function is referenced, but no entry point reaches it.",
+    "UNUSED_DEPENDENCY": "A declared package is never imported.",
+    "DUPLICATE_CODE": "A function body duplicates an earlier function.",
+}
 
 
 _LABELS = {
@@ -41,11 +58,25 @@ def render_json(result: ScanResult) -> str:
     return result.to_json()
 
 
-def render_github(result: ScanResult) -> str:
+def render_concise(result: ScanResult) -> str:
     lines = [
-        f"::error file={finding.path},line={finding.line},title={finding.rule}::{finding.message}"
+        f"{finding.path}:{finding.line}:{finding.column}: {finding.rule} {finding.message}"
         for finding in result.findings
     ]
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def render_github(result: ScanResult, root: Path | None = None) -> str:
+    prefix = _github_prefix(root)
+    lines = []
+    for finding in result.findings:
+        level = "error" if finding.confidence >= 90 else "warning"
+        path = _escape_property(f"{prefix}{finding.path}")
+        title = _escape_property(finding.rule)
+        message = _escape_message(finding.message)
+        lines.append(f"::{level} file={path},line={finding.line},title={title}::{message}")
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
@@ -64,7 +95,8 @@ def render_sarif(result: ScanResult) -> str:
                 {
                     "id": finding.rule,
                     "shortDescription": {"text": finding.rule},
-                    "fullDescription": {"text": finding.message},
+                    "fullDescription": {"text": _RULE_TEXT.get(finding.rule, finding.rule)},
+                    "helpUri": _HELP_URI,
                 }
             )
         results.append(
@@ -92,6 +124,7 @@ def render_sarif(result: ScanResult) -> str:
                     "driver": {
                         "name": "vyarth",
                         "version": __version__,
+                        "informationUri": _INFORMATION_URI,
                         "rules": rules,
                     }
                 },
@@ -100,6 +133,31 @@ def render_sarif(result: ScanResult) -> str:
         ],
     }
     return json.dumps(document, indent=2) + "\n"
+
+
+def _github_prefix(root: Path | None) -> str:
+    if root is None:
+        return ""
+    from vyarth.incremental import _git_prefix
+
+    try:
+        return _git_prefix(root)
+    except (OSError, RuntimeError):
+        return ""
+
+
+def _escape_property(value: str) -> str:
+    return (
+        value.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+        .replace(":", "%3A")
+        .replace(",", "%2C")
+    )
+
+
+def _escape_message(value: str) -> str:
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def _render_finding(finding: Finding) -> str:

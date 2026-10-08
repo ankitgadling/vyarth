@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from vyarth.config import Config
-from vyarth.discover import import_target, module_name, relative_posix
+from vyarth.discover import module_name, relative_posix
 from vyarth.entries import EntrySet, collect_entries
 from vyarth.flow import apply_flow
 from vyarth.graph import (
-    _reachable_symbols,
     class_attribute_findings,
     orphan_findings,
     reachable_modules,
+    reachable_symbols,
     wildcard_references,
 )
 from vyarth.model import Binding, FileIndex, Finding, ImportEdge, make_fingerprint
@@ -52,9 +52,10 @@ def collect_findings(
     project = build_project(indexes, root)
     project = rebind(project, apply_flow(project))
     entries = collect_entries(project, config)
-    reached, unresolved = _reachable_symbols(project, entries)
+    reached, unresolved = reachable_symbols(project, entries)
     referenced, exported = _cross_module_uses(project)
     referenced |= wildcard_references(project)
+    referenced |= set(entries.symbols)
     for index in project.indexes:
         relpath = relative_posix(Path(index.path), project.root)
         findings.extend(_symbol_findings(index, relpath, referenced, entries, reached))
@@ -183,7 +184,7 @@ def _import_origin(project: Project, index: FileIndex, binding: Binding) -> tupl
     edge = project.edge_for(index.path, binding.name, binding.line)
     if edge is None or edge.is_wildcard or not edge.imported_name or edge.imported_name == "*":
         return None
-    module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+    module = project.resolve_import(edge.module, edge.level, index.path)
     if not module:
         return None
     return module, edge.imported_name

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 from io import StringIO
 import re
 import tokenize
@@ -132,11 +133,19 @@ def apply_ignores(
     for finding in findings:
         if path_spec.match_file(finding.path):
             continue
+        if _name_ignored(finding, config.ignore_names):
+            continue
         index = indexes.get(finding.path)
         if index is not None and _comment_suppresses(index, finding):
             continue
         kept.append(finding)
     return kept
+
+
+def _name_ignored(finding: Finding, patterns: tuple[str, ...]) -> bool:
+    if not patterns:
+        return False
+    return any(fnmatch.fnmatchcase(finding.symbol, pattern) for pattern in patterns)
 
 
 def _comment_suppresses(index: FileIndex, finding: Finding) -> bool:

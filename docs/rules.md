@@ -6,7 +6,7 @@ Each finding has a rule, a status, a confidence from 0 to 100, a message, eviden
 
 | Rule | Meaning | Confidence | Status |
 | --- | --- | --- | --- |
-| `UNUSED_IMPORT` | Import name never loaded | 100, or 70 when that file imports dynamically or the import is an `ImportError` probe | `DEAD`, or `POSSIBLY_DEAD` at 70 |
+| `UNUSED_IMPORT` | Import name never loaded | 100, or 70 for a dynamic import, an `ImportError` probe, a possible `__init__.py` re-export, or a dotted side-effect import | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 96 at module level or on a used class, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 96 at module level, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_VARIABLE` | Module, class, or function variable never read | 100 in a function or at module level, 96 for an unreferenced attribute on a used class, 70 or 60 when a dynamic or unresolved call uses the name | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
@@ -14,10 +14,10 @@ Each finding has a rule, a status, a confidence from 0 to 100, a message, eviden
 | `ORPHAN_FUNCTION` | Referenced, but no entry point reaches it | 80, or 60 when an unresolved attribute call uses the name | `POSSIBLY_DEAD` |
 | `POSSIBLY_UNUSED_MODULE` | No entry module can import this file | 82, or 60 when the project imports dynamically | `POSSIBLY_UNUSED_MODULE` |
 | `WILDCARD_IMPORT` | `from module import *` limits analysis | 100 | `ANALYSIS_LIMIT` |
-| `UNUSED_DEPENDENCY` | Declared package with no import | 95, or 70 when the import name differs from the package name, or when the package is only a development or docs dependency | `POSSIBLY_DEAD` |
+| `UNUSED_DEPENDENCY` | Declared package with no import | 95, or 70 when the import name differs, the match is only a shared top-level namespace, or the package is a runtime-only or reported development dependency | `POSSIBLY_DEAD` |
 | `DUPLICATE_CODE` | Function body matches another function | 90 | `POSSIBLY_DUPLICATE` |
 
-Findings inside a possibly unused module do not score above that module, except `UNREACHABLE_CODE`, which stays at 100. Those findings disappear with the module under `--min-confidence 90`.
+Findings inside a possibly unused module do not score above that module, except `UNREACHABLE_CODE`, which stays at 100. Those findings disappear with the module under `--min-confidence 90`. When that cap, or the Alembic adjustment, lowers a `DEAD` finding below 100, the status becomes `POSSIBLY_DEAD`. `POSSIBLY_DUPLICATE` and `ANALYSIS_LIMIT` stay as they are.
 
 ## What counts as a load
 
@@ -47,7 +47,7 @@ A decorator that is not a recognized entry lowers the score to 75%, including a 
 
 A literal name passed to `getattr`, `setattr`, `eval`, or `exec` lowers that name to 70%, including a method or nested function. The message becomes `Dynamic usage detected. Static analysis cannot prove this symbol is unused.` Other names in the file stay at their own score.
 
-`upgrade`, `downgrade`, `revision`, `down_revision`, `branch_labels`, and `depends_on` under `alembic/versions/` score 70%. The finding stays, with evidence that Alembic loads the name when the migration runs.
+`upgrade`, `downgrade`, `revision`, `down_revision`, `branch_labels`, and `depends_on` under `alembic/versions/` score 70%. A finding that was `DEAD` becomes `POSSIBLY_DEAD`. The evidence says Alembic loads the name when the migration runs.
 
 ## `UNUSED_VARIABLE`
 
@@ -57,7 +57,14 @@ A plain class attribute that nothing loads, on a class that is used, is `UNUSED_
 
 ## `UNUSED_IMPORT`
 
-The imported name is unused when nothing in that file loads it and it is not re-exported through `__all__` or `from module import Name as Name`. Confidence stays at 100 unless the same file calls `importlib`, `importlib.import_module`, or `__import__`, which lowers every unused import in that file to 70%. An import that is the body of a `try` whose handler catches `ImportError` or `ModuleNotFoundError` stays reported at 70%, because the import may be an availability check and may also be unused. `# noqa` and `# noqa: F401` on the import statement, including a parenthesized import and a note after the code such as `# noqa: F401 kept for plugins`, suppress `UNUSED_IMPORT` for the names in that statement. A `# noqa` on the previous line does not.
+The imported name is unused when nothing in that file loads it and it is not re-exported through `__all__` or `from module import Name as Name`. Confidence stays at 100 unless one of these applies, in order:
+
+- The same file calls `importlib`, `importlib.import_module`, or `__import__`, which lowers every unused import in that file to 70%.
+- The import is the body of a `try` whose handler catches `ImportError` or `ModuleNotFoundError`. It stays reported at 70%, because the import may be an availability check and may also be unused.
+- The statement is a dotted `import pkg.sub` whose bound name is unused. It scores 70, with evidence `Import may run the submodule for its side effects.`
+- The unused import is in `__init__.py`. It scores 70, with evidence `Possible public re-export.`
+
+`# noqa` and `# noqa: F401` on the import statement, including a parenthesized import and a note after the code such as `# noqa: F401 kept for plugins`, suppress `UNUSED_IMPORT` for the names in that statement. A `# noqa` on the previous line does not.
 
 ## `UNREACHABLE_CODE`
 
@@ -92,9 +99,15 @@ Dependency names are read from:
 
 The package `python` is skipped. Requirement lines that are comments, `-r`, `-c`, `-e`, `--`, `git+`, or URLs are skipped.
 
-These install names match their import names and are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, `beautifulsoup4` / `bs4`, `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose`. A package declared only in a development or docs manifest (`requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, or a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`) stays reported at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package with no matching import stays at 95%, with the message `No Python imports found.`
+Names are compared with [PEP 503](https://peps.python.org/pep-0503/) normalization: lowercase, and each run of `.`, `_`, and `-` becomes one `-`. The full imported module string is kept, not only the top-level name. These install names match their import names and are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, `beautifulsoup4` / `bs4`, `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose` and installed distribution metadata does not connect them.
 
-Scanning a single file skips this rule. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt`. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
+When `importlib.metadata.packages_distributions()` is available, a declared package is used if its distribution provides an imported top-level module. Otherwise a hyphenated name that equals an imported module, or matches on a dotted boundary such as `zope.interface` or `google.cloud.storage`, is used. A top-level-only overlap, such as `import google` against `google-cloud-storage`, stays a finding at 70, with evidence that the namespace was imported.
+
+Packages that are often started without an import stay reported at 70, not 95: `gunicorn`, `uvicorn`, `hypercorn`, `daphne`, `waitress`, `gevent`, `eventlet`, `psycopg`, `psycopg2`, `psycopg2-binary`, `mysqlclient`, `pymysql`, `asyncpg`, `redis`, `hiredis`, and `whitenoise`.
+
+A package declared only in a development or docs manifest is not reported. That covers `requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, and a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`. Set `report_dev_dependencies = true` to report those at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package with no matching import stays at 95%, with the message `No Python imports found.`
+
+Scanning a single file skips this rule. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt`, or a manifest excluded by config or `.gitignore`. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
 
 ## `DUPLICATE_CODE`
 

@@ -97,7 +97,8 @@ def test_alembic_names_score_70_and_stay_reported(tmp_path):
     assert "Alembic loads this name" in findings[0].evidence[-1]
 
 
-def test_requirement_aliases_score_70_when_the_import_name_is_used(tmp_path):
+def test_requirement_aliases_score_70_when_the_import_name_is_used(tmp_path, monkeypatch):
+    monkeypatch.setattr("vyarth.dependencies._distribution_map", lambda: {})
     write_tree(
         tmp_path,
         {
@@ -113,7 +114,8 @@ def test_requirement_aliases_score_70_when_the_import_name_is_used(tmp_path):
     assert findings["python-jose"].confidence == 70
 
 
-def test_requirement_alias_scores_70_when_the_import_is_used(tmp_path):
+def test_requirement_alias_scores_70_when_the_import_is_used(tmp_path, monkeypatch):
+    monkeypatch.setattr("vyarth.dependencies._distribution_map", lambda: {})
     write_tree(
         tmp_path,
         {

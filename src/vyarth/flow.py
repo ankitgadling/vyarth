@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 
-from vyarth.discover import import_target
 from vyarth.model import Binding, CallEdge, ContainerStore, FileIndex, FlowBind, point_in_spans
 from vyarth.project import Project, call_is_dead
 
@@ -373,7 +371,7 @@ def _submodule_attribute(
     if not edge.imported_name:
         if not edge.module:
             return ""
-        module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+        module = project.resolve_import(edge.module, edge.level, index.path)
         if not module:
             return ""
         parent = project.by_module.get(module)
@@ -381,7 +379,7 @@ def _submodule_attribute(
         if parent is None or target is None:
             return ""
         return _xref(parent.path, target.qualname)
-    module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+    module = project.resolve_import(edge.module, edge.level, index.path)
     if not module:
         return ""
     parent = project.by_module.get(module)
@@ -401,7 +399,7 @@ def _module_named(project: Project, index: FileIndex, owner: str) -> FileIndex |
         if edge.is_wildcard or edge.alias != root_name:
             continue
         if edge.imported_name:
-            module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+            module = project.resolve_import(edge.module, edge.level, index.path)
             if module is None:
                 continue
             if owner == edge.alias:

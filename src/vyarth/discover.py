@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import os
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -28,8 +29,7 @@ def discover_files(root: Path, config: Config, *, within: Path | None = None) ->
     """
     root = root.resolve()
     start = root if within is None else within.resolve()
-    exclude_spec = pathspec.GitIgnoreSpec.from_lines(config.excludes)
-    gitignore = _load_gitignore(root)
+    exclude_spec, gitignore = exclusion_specs(root, config)
     found: list[Path] = []
     for dirpath, dirnames, filenames in os_walk(start):
         directory = Path(dirpath)
@@ -80,13 +80,18 @@ def module_names(path: Path, roots: list[Path]) -> list[str]:
     when the project root and ``src/`` are both roots. Call sites that import
     through the ``src.`` prefix resolve to the same file.
     """
-    resolved = path.resolve()
+    return list(_cached_module_names(str(path), tuple(str(root) for root in roots)))
+
+
+@lru_cache(maxsize=8192)
+def _cached_module_names(path_text: str, roots: tuple[str, ...]) -> tuple[str, ...]:
+    resolved = Path(path_text).resolve()
     names: list[str] = []
     for root in roots:
-        name = _module_name_under(resolved, root)
+        name = _module_name_under(resolved, Path(root))
         if name and name not in names:
             names.append(name)
-    return names
+    return tuple(names)
 
 
 class _HasPath(Protocol):
@@ -155,22 +160,6 @@ def package_parts(path: Path, roots: list[Path]) -> list[str] | None:
     return parts
 
 
-def modules_used_by(edge_module: str | None, edge_level: int, edge_imported: str | None, importer: Path, roots: list[Path]) -> set[str]:
-    """Project module names an import edge can load, including parent packages."""
-    target = _target_module(edge_module, edge_level, importer, roots)
-    if target is None:
-        return set()
-    names: set[str] = set()
-    if target:
-        segments = target.split(".")
-        for index in range(1, len(segments) + 1):
-            names.add(".".join(segments[:index]))
-    if edge_imported and edge_imported != "*":
-        child = f"{target}.{edge_imported}" if target else edge_imported
-        names.add(child)
-    return names
-
-
 _TEST_SPEC = pathspec.GitIgnoreSpec.from_lines(TEST_PATTERNS)
 
 
@@ -231,9 +220,90 @@ def _matches(spec: pathspec.PathSpec, relative: str) -> bool:
     return spec.match_file(relative.rstrip("/") + "/")
 
 
-def _load_gitignore(root: Path) -> pathspec.PathSpec | None:
-    path = root / ".gitignore"
-    if not path.is_file():
-        return None
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return pathspec.GitIgnoreSpec.from_lines(lines)
+def path_excluded(
+    relative: str,
+    exclude_spec: pathspec.PathSpec,
+    gitignore: pathspec.PathSpec | None,
+) -> bool:
+    return _excluded(exclude_spec, gitignore, relative)
+
+
+def exclusion_specs(root: Path, config: Config) -> tuple[pathspec.PathSpec, pathspec.PathSpec | None]:
+    """Exclude patterns and the gitignore stack for `root`."""
+    root = root.resolve()
+    return pathspec.GitIgnoreSpec.from_lines(config.excludes), load_gitignore(root)
+
+
+def load_gitignore(root: Path) -> pathspec.PathSpec | None:
+    """Root `.gitignore`, `.git/info/exclude`, and nested `.gitignore` files.
+
+    A nested file applies only under its directory. A later rule wins, so a
+    nested `!` pattern can un-ignore a file. A gitignore inside an already
+    ignored directory is not read.
+    """
+    root = root.resolve()
+    lines: list[str] = []
+    exclude = root / ".git" / "info" / "exclude"
+    if exclude.is_file():
+        lines.extend(_read_ignore_lines(exclude))
+    top = root / ".gitignore"
+    if top.is_file():
+        lines.extend(_read_ignore_lines(top))
+    spec = pathspec.GitIgnoreSpec.from_lines(lines) if lines else None
+    for dirpath, dirnames, _ in os.walk(root):
+        directory = Path(dirpath)
+        if directory.name == ".git":
+            dirnames[:] = []
+            continue
+        relative = "" if directory == root else _relative(root, directory)
+        if directory != root:
+            gitignore = directory / ".gitignore"
+            if gitignore.is_file() and relative and not _ignored(spec, relative):
+                prefixed = _prefix_gitignore(relative, _read_ignore_lines(gitignore))
+                if prefixed:
+                    lines.extend(prefixed)
+                    spec = pathspec.GitIgnoreSpec.from_lines(lines)
+        kept: list[str] = []
+        for name in dirnames:
+            if name == ".git":
+                continue
+            child = f"{relative}/{name}" if relative else name
+            if _ignored(spec, child):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+    return spec
+
+
+def _ignored(spec: pathspec.PathSpec | None, relative: str) -> bool:
+    if spec is None or not relative:
+        return False
+    return _matches(spec, relative)
+
+
+def _read_ignore_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return []
+
+
+def _prefix_gitignore(directory: str, lines: list[str]) -> list[str]:
+    prefixed: list[str] = []
+    for raw in lines:
+        text = raw.strip()
+        if not text or text.startswith("#"):
+            continue
+        negation = text.startswith("!")
+        body = text[1:].lstrip() if negation else text
+        anchored = body.startswith("/")
+        pattern = body[1:] if anchored else body
+        if not pattern:
+            continue
+        slashless = pattern.rstrip("/")
+        if anchored or "/" in slashless:
+            rewritten = f"{directory}/{pattern.lstrip('/')}"
+        else:
+            rewritten = f"{directory}/**/{pattern}"
+        prefixed.append(f"!{rewritten}" if negation else rewritten)
+    return prefixed

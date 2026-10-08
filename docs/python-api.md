@@ -35,7 +35,7 @@ def scan(
 
 `defines` merges into the fold map from config. Keys in `defines` win.
 
-`changed=True` on a directory scan keeps findings in Python files that `git diff --name-only <changed_from>` lists. Git failures raise `RuntimeError`. An empty diff returns a result with no findings and `files_scanned == 0`.
+`changed=True` on a directory scan keeps findings in Python files from `git diff --name-only <changed_from>` and from untracked files. Paths are mapped into the project when it sits below the git root. Git failures raise `RuntimeError`. An empty mapped set returns a result with no findings and `files_scanned == 0`.
 
 `use_cache=False` reparses every file. Single-file scans do not read or write the cache.
 
@@ -90,7 +90,7 @@ from vyarth import load_config
 config = load_config(Path("."))
 ```
 
-`load_config(root, config_path=None)` reads `[tool.vyarth]` from `root / "pyproject.toml"`, then `root / "vyarth.toml"`. An explicit `config_path` loads that file only. The fields match the [configuration keys](configuration.md): `ignore`, `exclude`, `entry_patterns`, `min_confidence`, `framework_decorators`, `entry_points`, `baseline`, `fail_on`, `fold`, `workers`, and `duplicate_min_statements`.
+`load_config(root, config_path=None)` reads `[tool.vyarth]` from `root / "pyproject.toml"`, then `root / "vyarth.toml"`. An explicit `config_path` loads that file only. The fields match the [configuration keys](configuration.md): `ignore`, `exclude`, `entry_patterns`, `min_confidence`, `framework_decorators`, `frameworks`, `ignore_names`, `ignore_decorators`, `ignore_bases`, `entry_points`, `baseline`, `fail_on`, `fold`, `workers`, `duplicate_min_statements`, and `report_dev_dependencies`.
 
 `config.fold_map()` returns the fold table as a `dict`. `config.excludes` is the built-in excludes plus `config.exclude`.
 
@@ -119,4 +119,4 @@ notes = apply_fixes(root, result.findings)
 updated, notes = rewrite_source(source, result.findings, "pkg/app.py")
 ```
 
-`apply_fixes` writes files and returns one note per edit. `rewrite_source` returns the new text and does not touch the disk. `is_fixable` is true for an unused import, and for unreachable code, nested functions, and function-local assignments at confidence 100. Details are in [Fix and editor](fix-and-editor.md).
+`apply_fixes` writes files and returns one note per edit. `rewrite_source` returns the new text and does not touch the disk. Both accept `unsafe=True` to include unused imports in `__init__.py` and dotted side-effect imports. `is_fixable` is true for an unused import whose status is `DEAD`, except one in `__init__.py`, and for unreachable code, nested functions, and function-local assignments at confidence 100. Details are in [Fix and editor](fix-and-editor.md).
