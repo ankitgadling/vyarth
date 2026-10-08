@@ -3,26 +3,56 @@
 from __future__ import annotations
 
 import ast
+import difflib
 from io import StringIO
 from pathlib import Path
 import tokenize
 
+from vyarth.confidence import PROBE_NOTE, REEXPORT_NOTE, SIDE_EFFECT_NOTE
 from vyarth.model import Finding
 
 
-def apply_fixes(root: Path, findings: list[Finding] | tuple[Finding, ...]) -> list[str]:
+def apply_fixes(
+    root: Path,
+    findings: list[Finding] | tuple[Finding, ...],
+    *,
+    unsafe: bool = False,
+    write: bool = True,
+) -> list[str]:
     """Apply every safe rewrite. Returns a note for each edit."""
-    return _write(root, list(findings))
+    return _write(root, list(findings), unsafe=unsafe, write=write)
 
 
-def apply_import_fixes(root: Path, findings: list[Finding] | tuple[Finding, ...]) -> list[str]:
+def apply_import_fixes(
+    root: Path,
+    findings: list[Finding] | tuple[Finding, ...],
+    *,
+    unsafe: bool = False,
+    write: bool = True,
+) -> list[str]:
     """Remove unused import names. Returns a note for each edit."""
-    chosen = [
-        finding
-        for finding in findings
-        if finding.rule == "UNUSED_IMPORT" and finding.status == "DEAD"
-    ]
-    return _write(root, chosen)
+    chosen = [finding for finding in findings if finding.rule == "UNUSED_IMPORT"]
+    return _write(root, chosen, unsafe=unsafe, write=write)
+
+
+def render_fix_diff(
+    root: Path,
+    findings: list[Finding] | tuple[Finding, ...],
+    *,
+    unsafe: bool = False,
+) -> str:
+    """Unified diff of the rewrites. Nothing is written."""
+    chunks: list[str] = []
+    for relpath, before, after, _ in _previews(root, list(findings), unsafe=unsafe):
+        chunks.extend(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=relpath,
+                tofile=relpath,
+            )
+        )
+    return "".join(chunks)
 
 
 def is_fixable(finding: Finding, source: str | None = None) -> bool:
@@ -33,6 +63,8 @@ def is_fixable(finding: Finding, source: str | None = None) -> bool:
     normal function.
     """
     if finding.rule == "UNUSED_IMPORT" and finding.status == "DEAD":
+        if _package_init(finding.path):
+            return False
         return True
     if finding.confidence < 100:
         return False
@@ -41,33 +73,61 @@ def is_fixable(finding: Finding, source: str | None = None) -> bool:
     return finding.rule in {"UNUSED_FUNCTION", "UNUSED_VARIABLE"} and _nested_name(finding)
 
 
-def rewrite_source(source: str, findings: list[Finding] | tuple[Finding, ...], relpath: str) -> tuple[str, list[str]]:
+def rewrite_source(
+    source: str,
+    findings: list[Finding] | tuple[Finding, ...],
+    relpath: str,
+    *,
+    unsafe: bool = False,
+    verb: str = "fixed",
+) -> tuple[str, list[str]]:
     """Return edited source and a note for each change. The file is not written."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return source, []
-    edits = _import_edits(tree, source, list(findings), relpath)
-    edits.extend(_statement_edits(tree, source, list(findings), relpath))
+    chosen = list(findings)
+    edits = _import_edits(tree, source, chosen, relpath, unsafe=unsafe, verb=verb)
+    edits.extend(_statement_edits(tree, source, chosen, relpath, verb=verb))
     return _apply_edits(source, edits)
 
 
-def _write(root: Path, findings: list[Finding]) -> list[str]:
+def _write(root: Path, findings: list[Finding], *, unsafe: bool, write: bool) -> list[str]:
+    verb = "fixed" if write else "would fix"
+    notes: list[str] = []
+    for relpath, source, updated, edits in _previews(root, findings, unsafe=unsafe, verb=verb):
+        if source == updated:
+            continue
+        if not write:
+            notes.extend(edits)
+            continue
+        path = root / relpath
+        path.write_text(updated, encoding="utf-8")
+        notes.extend(edits)
+    return notes
+
+
+def _previews(
+    root: Path,
+    findings: list[Finding],
+    *,
+    unsafe: bool,
+    verb: str = "fixed",
+) -> list[tuple[str, str, str, list[str]]]:
     grouped: dict[str, list[Finding]] = {}
     for finding in findings:
         grouped.setdefault(finding.path, []).append(finding)
-    notes: list[str] = []
+    previews: list[tuple[str, str, str, list[str]]] = []
     for relpath, items in grouped.items():
         path = root / relpath
         if not path.is_file():
             continue
         source = path.read_text(encoding="utf-8")
-        updated, edits = rewrite_source(source, items, relpath)
+        updated, edits = rewrite_source(source, items, relpath, unsafe=unsafe, verb=verb)
         if updated == source:
             continue
-        path.write_text(updated, encoding="utf-8")
-        notes.extend(edits)
-    return notes
+        previews.append((relpath, source, updated, edits))
+    return previews
 
 
 def _import_edits(
@@ -75,13 +135,12 @@ def _import_edits(
     source: str,
     findings: list[Finding],
     relpath: str,
+    *,
+    unsafe: bool,
+    verb: str,
 ) -> list[tuple[int, int, str, tuple[str, ...]]]:
     groups: dict[tuple[int, int], tuple[ast.Import | ast.ImportFrom, dict[str, int]]] = {}
-    imports = [
-        finding
-        for finding in findings
-        if finding.rule == "UNUSED_IMPORT" and finding.status == "DEAD"
-    ]
+    imports = [finding for finding in findings if _import_is_editable(finding, relpath, tree, unsafe)]
     for finding in imports:
         node = _import_at(tree, finding.line, finding.symbol)
         if node is None or not _pure_import(source, node):
@@ -113,7 +172,7 @@ def _import_edits(
                 line += "\n"
             replacement = line
         notes = tuple(
-            f"fixed {relpath}:{line_number} {symbol}"
+            f"{verb} {relpath}:{line_number} {symbol}"
             for symbol, line_number in sorted(symbols.items(), key=lambda item: item[1])
         )
         edits.append((start, end, replacement, notes))
@@ -205,6 +264,8 @@ def _statement_edits(
     source: str,
     findings: list[Finding],
     relpath: str,
+    *,
+    verb: str,
 ) -> list[tuple[int, int, str, tuple[str, ...]]]:
     parents = _parents(tree)
     locals_at = {
@@ -223,11 +284,11 @@ def _statement_edits(
             continue
         edit: tuple[int, int, str, tuple[str, ...]] | None = None
         if finding.rule == "UNREACHABLE_CODE" and not _sole_yield(source, finding.line):
-            edit = _unreachable_edit(tree, parents, source, finding, relpath, dead_lines)
+            edit = _unreachable_edit(tree, parents, source, finding, relpath, dead_lines, verb)
         elif finding.rule == "UNUSED_FUNCTION" and _nested_name(finding):
-            edit = _function_edit(tree, parents, source, finding, relpath)
+            edit = _function_edit(tree, parents, source, finding, relpath, verb)
         elif finding.rule == "UNUSED_VARIABLE" and _nested_name(finding):
-            edit = _variable_edit(tree, parents, source, finding, locals_at, relpath)
+            edit = _variable_edit(tree, parents, source, finding, locals_at, relpath, verb)
         if edit is not None:
             edits.append(edit)
     return edits
@@ -263,6 +324,7 @@ def _unreachable_edit(
     finding: Finding,
     relpath: str,
     dead_lines: set[int],
+    verb: str,
 ) -> tuple[int, int, str, tuple[str, ...]] | None:
     match = _statement_at(tree, finding.line)
     if match is None or not _private_span(match, parents, source):
@@ -275,7 +337,7 @@ def _unreachable_edit(
         original = lines[match.lineno - 1]
         indent = original[: len(original) - len(original.lstrip(" \t"))]
         replacement = f"{indent}pass\n"
-    return match.lineno, end, replacement, (f"fixed {relpath}:{finding.line} {finding.symbol}",)
+    return match.lineno, end, replacement, (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
 
 
 def _suite_containing(parent: ast.AST | None, node: ast.AST) -> list[ast.stmt] | None:
@@ -306,6 +368,7 @@ def _function_edit(
     source: str,
     finding: Finding,
     relpath: str,
+    verb: str,
 ) -> tuple[int, int, str, tuple[str, ...]] | None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -318,7 +381,7 @@ def _function_edit(
         if node.decorator_list:
             start = min(item.lineno for item in node.decorator_list)
         end = node.end_lineno or node.lineno
-        return start, end, "", (f"fixed {relpath}:{finding.line} {finding.symbol}",)
+        return start, end, "", (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
     return None
 
 
@@ -329,6 +392,7 @@ def _variable_edit(
     finding: Finding,
     locals_at: set[tuple[int, str]],
     relpath: str,
+    verb: str,
 ) -> tuple[int, int, str, tuple[str, ...]] | None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and node.lineno == finding.line:
@@ -345,15 +409,45 @@ def _variable_edit(
             if _has_call(node.value) or not _private_span(node, parents, source):
                 return None
             end = node.end_lineno or node.lineno
-            return node.lineno, end, "", (f"fixed {relpath}:{finding.line} {finding.symbol}",)
+            return node.lineno, end, "", (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
         if isinstance(node, ast.AnnAssign) and node.lineno == finding.line and node.value is not None:
             if not isinstance(node.target, ast.Name) or node.target.id != finding.symbol:
                 continue
             if _has_call(node.value) or not _private_span(node, parents, source):
                 return None
             end = node.end_lineno or node.lineno
-            return node.lineno, end, "", (f"fixed {relpath}:{finding.line} {finding.symbol}",)
+            return node.lineno, end, "", (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
     return None
+
+
+def _import_is_editable(finding: Finding, relpath: str, tree: ast.AST, unsafe: bool) -> bool:
+    if finding.rule != "UNUSED_IMPORT":
+        return False
+    protected = _protected_import(finding, relpath, tree)
+    if finding.status == "DEAD":
+        return unsafe or not protected
+    if not unsafe or PROBE_NOTE in finding.evidence:
+        return False
+    if REEXPORT_NOTE not in finding.evidence and SIDE_EFFECT_NOTE not in finding.evidence:
+        return False
+    return protected
+
+
+def _protected_import(finding: Finding, relpath: str, tree: ast.AST) -> bool:
+    if _package_init(relpath):
+        return True
+    node = _import_at(tree, finding.line, finding.symbol)
+    if not isinstance(node, ast.Import):
+        return False
+    for alias in node.names:
+        if _alias_symbol(node, alias) == finding.symbol and "." in alias.name:
+            return True
+    return False
+
+
+def _package_init(path: str) -> bool:
+    name = path.replace("\\", "/")
+    return name == "__init__.py" or name.endswith("/__init__.py")
 
 
 def _apply_edits(

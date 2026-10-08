@@ -8,12 +8,37 @@ from pathlib import Path
 import re
 import tomllib
 
+from vyarth.config import Config
+from vyarth.discover import exclusion_specs, path_excluded, relative_posix
 from vyarth.model import FileIndex, Finding, ParseError, make_fingerprint
 
 
 _NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+_PEP503 = re.compile(r"[-_.]+")
 _MESSAGE = "No Python imports found."
 _DEV_EVIDENCE = "Declared in {path} as a development or docs dependency and never imported."
+_NAMESPACE_NOTE = "A top-level import uses this package's namespace, so the dependency cannot be proved unused."
+_RUNTIME_NOTE = "This package is often started without an import."
+_RUNTIME_ONLY = frozenset(
+    {
+        "gunicorn",
+        "uvicorn",
+        "hypercorn",
+        "daphne",
+        "waitress",
+        "gevent",
+        "eventlet",
+        "psycopg",
+        "psycopg2",
+        "psycopg2-binary",
+        "mysqlclient",
+        "pymysql",
+        "asyncpg",
+        "redis",
+        "hiredis",
+        "whitenoise",
+    }
+)
 _DEV_EXTRAS = {"dev", "test", "tests", "docs", "doc", "lint"}
 _CANONICAL = {
     "pil": "pillow",
@@ -56,11 +81,16 @@ def dependency_findings(
     indexes: list[FileIndex],
     root: Path,
     within: Path | None = None,
+    config: Config | None = None,
 ) -> tuple[list[Finding], list[ParseError]]:
-    imported = {_canonical(_top_level(name)) for name in _import_roots(indexes)}
+    if config is None:
+        config = Config()
+    modules = _import_modules(indexes)
+    imported = {_canonical(_top_level(name)) for name in modules}
+    distributions = _used_distributions(modules)
     declared: dict[str, tuple[str, int, bool]] = {}
     errors: list[ParseError] = []
-    for manifest, packages, error in _declared(root):
+    for manifest, packages, error in _declared(root, config):
         if not _manifest_in_scan(manifest, root, within):
             continue
         if error is not None:
@@ -75,16 +105,24 @@ def dependency_findings(
                 declared[key] = (relpath, line, dev)
     findings: list[Finding] = []
     for name in sorted(declared):
-        if name in imported:
+        if name in imported or name in distributions or _import_match(name, modules) == "used":
             continue
         relpath, line, dev = declared[name]
         alias = _IMPORT_ALIAS.get(name)
-        if alias is not None and alias in imported:
+        if alias is not None and _canonical(alias) in imported:
             confidence = 70
             evidence = (f"Imported as {alias}, so the package name cannot be proved unused.",)
+        elif _import_match(name, modules) == "namespace":
+            confidence = 70
+            evidence = (_NAMESPACE_NOTE,)
         elif dev:
+            if not config.report_dev_dependencies:
+                continue
             confidence = 70
             evidence = (_DEV_EVIDENCE.format(path=relpath),)
+        elif name in _RUNTIME_ONLY:
+            confidence = 70
+            evidence = (_RUNTIME_NOTE,)
         else:
             confidence = 95
             evidence = (f"Declared in {relpath} and never imported.",)
@@ -117,18 +155,59 @@ def _manifest_in_scan(path: Path, root: Path, within: Path | None) -> bool:
     return resolved.parent == root.resolve()
 
 
-def _import_roots(indexes: list[FileIndex]) -> set[str]:
-    roots: set[str] = set()
+def _import_modules(indexes: list[FileIndex]) -> set[str]:
+    modules: set[str] = set()
     for index in indexes:
         for edge in index.imports:
             if edge.level:
                 continue
             module = edge.module or ""
-            top = module.split(".", 1)[0]
-            if top:
-                roots.add(top)
-        roots.update(name for name in index.dynamic_imports if name)
-    return roots
+            if module:
+                modules.add(module)
+        modules.update(name for name in index.dynamic_imports if name)
+    return modules
+
+
+_DISTRIBUTIONS: dict[str, list[str]] | None = None
+
+
+def _used_distributions(modules: set[str]) -> set[str]:
+    mapping = _distribution_map()
+    found: set[str] = set()
+    for module in modules:
+        for dist in mapping.get(_top_level(module), ()):
+            found.add(_canonical(str(dist)))
+    return found
+
+
+def _distribution_map() -> dict[str, list[str]]:
+    global _DISTRIBUTIONS
+    if _DISTRIBUTIONS is not None:
+        return _DISTRIBUTIONS
+    try:
+        from importlib.metadata import packages_distributions
+
+        loaded = packages_distributions()
+    except Exception:
+        loaded = {}
+    _DISTRIBUTIONS = {str(key): [str(item) for item in value] for key, value in loaded.items()}
+    return _DISTRIBUTIONS
+
+
+def _import_match(name: str, modules: set[str]) -> str:
+    """`used` when an import names the package, `namespace` for a top-level overlap."""
+    dotted = name.replace("-", ".")
+    namespace = False
+    for module in modules:
+        if not module:
+            continue
+        if module == dotted or module.startswith(f"{dotted}."):
+            return "used"
+        if dotted.startswith(f"{module}."):
+            if "." in module:
+                return "used"
+            namespace = True
+    return "namespace" if namespace else ""
 
 
 def _top_level(name: str) -> str:
@@ -136,19 +215,35 @@ def _top_level(name: str) -> str:
 
 
 def _canonical(name: str) -> str:
-    normalized = name.strip().lower().replace("_", "-")
+    normalized = _PEP503.sub("-", name.strip().lower())
     return _CANONICAL.get(normalized, normalized)
 
 
-def _declared(root: Path) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
+def _declared(
+    root: Path,
+    config: Config,
+) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
     found: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
     root = root.resolve()
+    exclude_spec, gitignore = exclusion_specs(root, config)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS and not name.endswith(".egg-info")]
+        directory = Path(dirpath)
+        kept: list[str] = []
+        for name in dirnames:
+            if name in _SKIP_DIRS or name.endswith(".egg-info"):
+                continue
+            relative = relative_posix(directory / name, root)
+            if path_excluded(relative, exclude_spec, gitignore):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
         for name in sorted(filenames):
             if name not in _MANIFESTS:
                 continue
-            path = Path(dirpath) / name
+            path = directory / name
+            relative = relative_posix(path, root)
+            if path_excluded(relative, exclude_spec, gitignore):
+                continue
             packages, error = _read_manifest(path, root)
             found.append((path, packages, error))
     return found

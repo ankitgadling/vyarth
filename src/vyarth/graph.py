@@ -7,7 +7,7 @@ from pathlib import Path
 import pathspec
 
 from vyarth.config import Config
-from vyarth.discover import import_target, module_name, module_names, modules_used_by, relative_posix
+from vyarth.discover import relative_posix
 from vyarth.entries import EntrySet
 from vyarth.flow import container_targets, held_elements, _module_function, _module_named
 from vyarth.model import Binding, CallEdge, FileIndex, Finding, make_fingerprint
@@ -40,7 +40,7 @@ def reachable_modules(project: Project, entries: EntrySet, config: Config) -> se
     """Modules an entry file can import, including packages along the way."""
     aliases: dict[str, set[str]] = {}
     for index in project.indexes:
-        names = set(module_names(Path(index.path), project.roots))
+        names = set(project.module_names_by_path.get(index.path, ()))
         for name in names:
             if project.by_module.get(name) is index:
                 aliases[name] = names
@@ -50,9 +50,9 @@ def reachable_modules(project: Project, entries: EntrySet, config: Config) -> se
         for index in project.indexes:
             relpath = relative_posix(Path(index.path), project.root)
             if ignored.match_file(relpath):
-                dotted = module_name(Path(index.path), project.roots)
-                if dotted is not None:
-                    seeds.add(dotted)
+                dotted = project.module_names_by_path.get(index.path, ())
+                if dotted:
+                    seeds.add(dotted[0])
     seen = _with_parents(seeds)
     queue = list(seen)
     while queue:
@@ -60,9 +60,8 @@ def reachable_modules(project: Project, entries: EntrySet, config: Config) -> se
         module_index = project.by_module.get(name)
         if module_index is None:
             continue
-        path = Path(module_index.path)
         for edge in module_index.imports:
-            for used in modules_used_by(edge.module, edge.level, edge.imported_name, path, project.roots):
+            for used in project.modules_used_by(edge.module, edge.level, edge.imported_name, module_index.path):
                 _reach(used, seen, queue, aliases)
     return seen
 
@@ -212,7 +211,7 @@ def _orphan(relpath: str, binding: Binding, confidence: int) -> Finding:
     )
 
 
-def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[str, str]], set[str]]:
+def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[str, str]], set[str]]:
     reachable: set[tuple[str, str]] = set()
     unresolved: set[str] = set()
     queue: list[tuple[str, str]] = []
@@ -475,14 +474,20 @@ def _add_call_target(project: Project, path: str, call: CallEdge, add) -> None:
 
 
 def _follow_imports(project: Project, path: str, qualname: str) -> tuple[str, str]:
+    key = (path, qualname)
+    cached = project.follow_cache.get(key)
+    if cached is not None:
+        return cached
     seen: set[tuple[str, str]] = set()
     current = (path, qualname)
     while current not in seen:
         seen.add(current)
         jumped = _jump_import(project, current[0], current[1])
         if jumped is None:
+            project.follow_cache[key] = current
             return current
         current = jumped
+    project.follow_cache[key] = current
     return current
 
 
@@ -506,7 +511,7 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
     edge = project.edge_for(index.path, binding.name, binding.line)
     if edge is None or edge.is_wildcard or edge.imported_name == "*":
         return None
-    module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+    module = project.resolve_import(edge.module, edge.level, index.path)
     if not edge.imported_name:
         if not method or not module:
             return None
@@ -593,7 +598,7 @@ def _wildcard_symbol(project: Project, index: FileIndex, name: str) -> tuple[str
     for edge in index.imports:
         if not edge.is_wildcard:
             continue
-        module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+        module = project.resolve_import(edge.module, edge.level, index.path)
         if not module:
             continue
         target = project.by_module.get(module)
@@ -664,6 +669,22 @@ def _base_leaf(base: str) -> str:
     return base.rsplit(".", 1)[-1]
 
 
+def _resolved_mentions(project: Project) -> set[tuple[str, str]]:
+    if project.mentions is not None:
+        return project.mentions
+    found: set[tuple[str, str]] = set()
+    for (path, _), calls in project.calls_by_caller.items():
+        for call in calls:
+            if not call.resolved or not call.callee:
+                continue
+            found.add(_follow_imports(project, path, call.callee))
+    for (path, _), uses in project.value_uses.items():
+        for used in uses:
+            found.add(_follow_imports(project, path, used))
+    project.mentions = found
+    return found
+
+
 def _symbol_referenced(
     project: Project,
     index: FileIndex,
@@ -672,20 +693,7 @@ def _symbol_referenced(
 ) -> bool:
     if _referenced(index, binding, referenced):
         return True
-    qualname = binding.qualname
-    for (path, _), calls in project.calls_by_caller.items():
-        for call in calls:
-            if not call.resolved or not call.callee:
-                continue
-            resolved_path, resolved_name = _follow_imports(project, path, call.callee)
-            if resolved_path == index.path and resolved_name == qualname:
-                return True
-    for (path, _), uses in project.value_uses.items():
-        for used in uses:
-            resolved_path, resolved_name = _follow_imports(project, path, used)
-            if resolved_path == index.path and resolved_name == qualname:
-                return True
-    return False
+    return (index.path, binding.qualname) in _resolved_mentions(project)
 
 
 def _referenced(index: FileIndex, binding: Binding, referenced: set[tuple[str, str]]) -> bool:

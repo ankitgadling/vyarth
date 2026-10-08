@@ -164,7 +164,7 @@ def test_baseline_filter_and_formats(tmp_path, capsys):
 
     assert main(["scan", str(tmp_path), "--format", "github"]) == 1
     github = capsys.readouterr().out
-    assert github.startswith("::error file=app.py,line=")
+    assert github.startswith("::warning file=app.py,line=")
     assert "title=UNUSED_FUNCTION::" in github
 
     assert main(["scan", str(tmp_path), "--format", "sarif"]) == 1
@@ -173,6 +173,10 @@ def test_baseline_filter_and_formats(tmp_path, capsys):
     result = next(item for item in sarif["runs"][0]["results"] if item["ruleId"] == "UNUSED_FUNCTION")
     assert result["level"] == "warning"
     assert result["partialFingerprints"]["vyarth/fingerprint"].startswith("UNUSED_FUNCTION:app.py:")
+    rule = next(item for item in sarif["runs"][0]["tool"]["driver"]["rules"] if item["id"] == "UNUSED_FUNCTION")
+    assert rule["fullDescription"]["text"] != result["message"]["text"]
+    assert rule["helpUri"].endswith("/docs/rules.md")
+    assert sarif["runs"][0]["tool"]["driver"]["informationUri"] == "https://github.com/ankitgadling/vyarth"
 
 
 def test_fail_on_high_keeps_medium_findings_and_exits_zero(tmp_path, capsys):
@@ -230,7 +234,15 @@ def test_setup_pipfile_poetry_and_uv_dependencies(tmp_path):
         },
     )
     symbols = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_DEPENDENCY"}
-    assert symbols == {"left-package", "right-package", "missing-poetry", "missing-uv"}
+    assert symbols == {"left-package", "right-package", "missing-poetry"}
+    from vyarth.config import Config
+
+    reported = {
+        finding.symbol
+        for finding in scan(tmp_path, config=Config(report_dev_dependencies=True)).findings
+        if finding.rule == "UNUSED_DEPENDENCY"
+    }
+    assert "missing-uv" in reported
 
 
 def test_importlib_lowers_unused_module_confidence(tmp_path):

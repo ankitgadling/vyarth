@@ -5,22 +5,27 @@
 ```bash
 vyarth fix .
 vyarth fix src/ --min-confidence 100
+vyarth fix . --dry-run
+vyarth fix . --diff
+vyarth fix . --unsafe
 ```
 
 `fix` scans, rewrites the edits that are safe to delete, and scans again. Each edit prints a note such as `fixed pkg/app.py:4 helper`. The report after the rescan is the command output. The same flags as `scan` apply to both passes.
 
-These findings are rewritten when confidence is 100:
+`--dry-run` prints `would fix` notes and does not write or rescan. `--diff` prints a unified diff and does not write. `--unsafe` also removes the two import categories below. It does not remove an import that was lowered because the file imports dynamically or the import is an `ImportError` probe.
+
+These findings are rewritten when confidence is 100, except an unused import, which is rewritten when its status is `DEAD`:
 
 | Finding | Edit |
 | --- | --- |
-| `UNUSED_IMPORT` with status `DEAD` | Drop that imported name. An import statement with no names left is deleted. |
+| `UNUSED_IMPORT` with status `DEAD` | Drop that imported name. An import statement with no names left is deleted. An unused import in `__init__.py`, and a dotted `import pkg.sub`, stay in place unless `--unsafe` is set. |
 | `UNREACHABLE_CODE` | Delete the statement. If that empties a `if`, `for`, `while`, `try`, `with`, or `match` body, the body becomes `pass`. A `yield` or `yield from` that is the only yield in its function is left in place. |
 | `UNUSED_FUNCTION` whose qualname is nested | Delete the nested function, including its decorators. |
 | `UNUSED_VARIABLE` whose qualname is nested | Delete the assignment when every name on that line is an unused local and the value is not a call. |
 
 Module-level functions, classes, methods, and module-level assignments stay reported. A line that mixes an import with another statement is left alone, and so is a wildcard import. A trailing comment on an import line is kept when the statement remains.
 
-`vyarth.fix.rewrite_source(source, findings, relpath)` applies the same edits to a string and returns `(new_source, notes)`. `apply_fixes(root, findings)` writes the files. `is_fixable(finding, source=None)` reports whether a finding is a candidate before the syntax checks that can still skip it. Pass the file text so the sole-yield guard can refuse an unreachable generator yield.
+`vyarth.fix.rewrite_source(source, findings, relpath)` applies the same edits to a string and returns `(new_source, notes)`. Pass `unsafe=True` to include the `__init__.py` and dotted-import edits. `apply_fixes(root, findings)` writes the files. `is_fixable(finding, source=None)` reports whether a finding is a candidate before the syntax checks that can still skip it. Pass the file text so the sole-yield guard can refuse an unreachable generator yield.
 
 ## Language server
 
@@ -34,6 +39,7 @@ The server speaks [Language Server Protocol](https://microsoft.github.io/languag
 
 - full text-document sync
 - pull diagnostics (`diagnosticProvider`, with `interFileDependencies`)
+- push diagnostics
 - code actions of kind `quickfix`
 
 It answers:
@@ -43,14 +49,15 @@ It answers:
 | `initialize` | Returns the capabilities above. `serverInfo.name` is `vyarth`. |
 | `shutdown` | Returns a null result. |
 | `exit` | Stops the process. |
-| `textDocument/didOpen` | Remembers the buffer and uses it on the next diagnostic request. |
-| `textDocument/didChange` | Replaces the remembered buffer with the latest full text. |
-| `textDocument/didSave` | Drops the buffer so the next request reads the file from disk. |
+| `textDocument/didOpen` | Remembers `textDocument.text` and publishes diagnostics for that URI. |
+| `textDocument/didChange` | Replaces the remembered buffer with the latest full text from `contentChanges` and publishes diagnostics. |
+| `textDocument/didSave` | Drops the buffer, reads the file from disk, and publishes diagnostics. |
 | `textDocument/diagnostic` | Returns diagnostics for that file from a project scan. |
 | `textDocument/codeAction` | Returns a quick fix for each fixable finding in the requested range. |
+| `textDocument/publishDiagnostics` | Sent after open, change, and save. The client does not request it. |
 
 Diagnostics use severity 1 (error) at confidence 90 or above and severity 2 (warning) below that. `source` is `vyarth` and `code` is the rule id.
 
-The project root is the nearest parent of the file that contains `pyproject.toml`, `vyarth.toml`, or `.git`. A scan of that root is reused until a file’s size or modification time changes, or an open buffer supplies overlay text. Code actions call the same rewrites as `vyarth fix` and return a workspace edit for the changed span.
+The project root is the nearest parent of the file that contains `pyproject.toml`, `vyarth.toml`, or `.git`. A scan is reused while the project root, the open buffer text, and the size and modification time of the indexed files stay the same. An unchanged unsaved buffer does not scan again. The file list is restatted instead of walking the tree on every request. A request that fails returns a JSON-RPC error (`-32700` for invalid JSON, `-32603` for an internal error) when the message has an id, and the server keeps reading. A failed notification is logged on standard error and does not stop the process. Code actions call the same rewrites as `vyarth fix` and return a workspace edit for the changed span.
 
 There is no published editor extension yet. Any client that can launch a stdio language server can use `vyarth lsp` directly.

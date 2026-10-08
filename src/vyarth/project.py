@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from vyarth.discover import indexes_by_module, package_roots
+from vyarth.discover import import_target, indexes_by_module, module_names, package_roots
 from vyarth.model import Binding, CallEdge, FileIndex, ImportEdge, UnreachableSpan, point_in_spans
 
 
@@ -27,6 +27,41 @@ class Project:
     function_callers: set[tuple[str, str]]
     value_uses: dict[tuple[str, str], tuple[str, ...]]
     dead_spans: dict[str, tuple[UnreachableSpan, ...]]
+    module_names_by_path: dict[str, tuple[str, ...]]
+    package_parts_by_path: dict[str, tuple[str, ...] | None]
+    follow_cache: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
+    mentions: set[tuple[str, str]] | None = None
+
+    def resolve_import(self, module: str | None, level: int, importer: str) -> str | None:
+        """Module an import loads. Relative imports use the importer's package parts."""
+        if level <= 0:
+            return module or ""
+        if importer not in self.package_parts_by_path:
+            return import_target(module, level, Path(importer), self.roots)
+        package = self.package_parts_by_path[importer]
+        if package is None:
+            return None
+        drop = level - 1
+        if drop > len(package):
+            return None
+        parts = list(package[: len(package) - drop] if drop else package)
+        if module:
+            parts.extend(part for part in module.split(".") if part)
+        return ".".join(parts)
+
+    def modules_used_by(self, module: str | None, level: int, imported: str | None, importer: str) -> set[str]:
+        target = self.resolve_import(module, level, importer)
+        if target is None:
+            return set()
+        names: set[str] = set()
+        if target:
+            segments = target.split(".")
+            for index in range(1, len(segments) + 1):
+                names.add(".".join(segments[:index]))
+        if imported and imported != "*":
+            child = f"{target}.{imported}" if target else imported
+            names.add(child)
+        return names
 
     def edge_for(self, path: str, alias: str, line: int) -> ImportEdge | None:
         edges = self.import_edges.get(path, {}).get(alias, ())
@@ -58,6 +93,7 @@ def build_project(indexes: list[FileIndex], root: Path) -> Project:
     root = root.resolve()
     roots = package_roots(root)
     by_path = {index.path: index for index in indexes}
+    module_names_by_path, package_parts_by_path = _module_maps(indexes, roots)
     bindings: dict[str, dict[str, Binding]] = {}
     module_bindings: dict[str, dict[str, Binding]] = {}
     import_edges: dict[str, dict[str, tuple[ImportEdge, ...]]] = {}
@@ -114,11 +150,33 @@ def build_project(indexes: list[FileIndex], root: Path) -> Project:
         function_callers=function_callers,
         value_uses={key: tuple(found) for key, found in value_uses.items()},
         dead_spans={index.path: index.unreachable for index in indexes},
+        module_names_by_path=module_names_by_path,
+        package_parts_by_path=package_parts_by_path,
     )
 
 
 def call_is_dead(project: Project, path: str, line: int, col_offset: int) -> bool:
     return point_in_spans(project.dead_spans.get(path, ()), line, col_offset)
+
+
+def _module_maps(
+    indexes: list[FileIndex],
+    roots: list[Path],
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...] | None]]:
+    names_by_path: dict[str, tuple[str, ...]] = {}
+    packages: dict[str, tuple[str, ...] | None] = {}
+    for index in indexes:
+        path = Path(index.path)
+        names = tuple(module_names(path, roots))
+        names_by_path[index.path] = names
+        if not names:
+            packages[index.path] = None
+            continue
+        parts = names[0].split(".")
+        if path.name != "__init__.py":
+            parts = parts[:-1]
+        packages[index.path] = tuple(parts)
+    return names_by_path, packages
 
 
 def _calls_by_caller(indexes: list[FileIndex]) -> dict[tuple[str, str], tuple[CallEdge, ...]]:

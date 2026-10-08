@@ -302,7 +302,7 @@ def test_ignore_above_a_decorator_suppresses_the_function(tmp_path):
 def test_fix_removes_every_name_in_a_parenthesized_import(tmp_path):
     path = tmp_path / "app.py"
     path.write_text("from json import (\n    dumps,\n    loads,\n)\n", encoding="utf-8")
-    result = scan(tmp_path)
+    result = scan(path)
     notes = apply_import_fixes(tmp_path, result.findings)
     assert path.read_text(encoding="utf-8").strip() == ""
     assert len(notes) == 2
@@ -322,7 +322,7 @@ def test_quoted_annotation_keeps_a_type_checking_import(tmp_path):
         "    return value\n",
         encoding="utf-8",
     )
-    result = scan(tmp_path)
+    result = scan(path)
     unused = {finding.symbol for finding in result.findings if finding.rule == "UNUSED_IMPORT"}
     assert "Decimal" not in unused
     assert "Fraction" in unused
@@ -359,8 +359,10 @@ def test_import_module_string_counts_as_a_used_dependency(tmp_path):
 
 
 def test_cache_stamp_includes_the_analyzer_version():
+    from vyarth import __version__
+
     stamp = cache_stamp(4, 8, {"A": "b"})
-    assert stamp.startswith(f"{INDEX_VERSION}:")
+    assert stamp.startswith(f"{__version__}:{INDEX_VERSION}:")
 
 
 def test_later_assignment_is_the_call_target(tmp_path):
@@ -952,10 +954,20 @@ def test_dev_only_dependency_scores_70(tmp_path):
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
     assert findings["runtime-missing"].confidence == 95
-    assert findings["ruff"].confidence == 70
-    assert "development or docs" in findings["ruff"].evidence[0]
-    assert findings["sphinx"].confidence == 70
-    assert findings["pytest"].confidence == 70
+    assert "ruff" not in findings
+    assert "sphinx" not in findings
+    assert "pytest" not in findings
+    from vyarth.config import Config
+
+    reported = {
+        item.symbol: item
+        for item in scan(tmp_path, config=Config(report_dev_dependencies=True)).findings
+        if item.rule == "UNUSED_DEPENDENCY"
+    }
+    assert reported["ruff"].confidence == 70
+    assert "development or docs" in reported["ruff"].evidence[0]
+    assert reported["sphinx"].confidence == 70
+    assert reported["pytest"].confidence == 70
 
 
 def test_cast_string_keeps_the_import(tmp_path):
@@ -1100,6 +1112,14 @@ def test_dev_optional_extra_scores_70(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
-    assert findings["ruff"].confidence == 70
-    assert "development or docs" in findings["ruff"].evidence[0]
+    assert "ruff" not in findings
     assert findings["click"].confidence == 95
+    from vyarth.config import Config
+
+    reported = {
+        item.symbol: item
+        for item in scan(tmp_path, config=Config(report_dev_dependencies=True)).findings
+        if item.rule == "UNUSED_DEPENDENCY"
+    }
+    assert reported["ruff"].confidence == 70
+    assert "development or docs" in reported["ruff"].evidence[0]

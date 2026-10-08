@@ -165,6 +165,46 @@ def test_duplicate_bodies_are_reported(tmp_path):
     assert "no incoming imports" in finding.evidence[-1]
 
 
+def test_changed_includes_files_below_the_git_root(tmp_path, capsys):
+    write_tree(
+        tmp_path,
+        {
+            "svc/pyproject.toml": "[project]\nname = 'svc'\nversion = '0'\n",
+            "svc/kept.py": "def old():\n    return 1\n",
+            "svc/edited.py": "def stale():\n    return 1\n",
+            "other.py": "def outside():\n    return 1\n",
+        },
+    )
+    _git(tmp_path, "init")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "svc" / "edited.py").write_text("def fresh():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "svc" / "new.py").write_text("def added():\n    return 1\n", encoding="utf-8")
+    assert main(["scan", str(tmp_path / "svc"), "--changed", "--no-cache"]) == 1
+    text = capsys.readouterr().out
+    assert "fresh" in text
+    assert "added" in text
+    assert "old" not in text
+    assert "outside" not in text
+
+
+def test_changed_warns_when_python_edits_are_outside_the_project(tmp_path, capsys):
+    write_tree(
+        tmp_path,
+        {
+            "svc/pyproject.toml": "[project]\nname = 'svc'\nversion = '0'\n",
+            "svc/kept.py": "def old():\n    return 1\n",
+            "other.py": "def outside():\n    return 1\n",
+        },
+    )
+    _git(tmp_path, "init")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "other.py").write_text("def outside():\n    return 2\n", encoding="utf-8")
+    assert main(["scan", str(tmp_path / "svc"), "--changed", "--no-cache"]) == 0
+    assert "none are inside this project" in capsys.readouterr().err
+
+
 def test_changed_limits_the_report(tmp_path, capsys):
     write_tree(
         tmp_path,

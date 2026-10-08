@@ -33,6 +33,11 @@ _DECORATED_NOTE = "Decorated, but not a recognized framework entry."
 _MODULE_CAP_NOTE = "This file has no incoming imports, so this score follows the module."
 _ALEMBIC_NOTE = "Alembic loads this name when the migration runs."
 _PROBE_NOTE = "This import sits in a try that catches ImportError, so it may be an availability check."
+_REEXPORT_NOTE = "Possible public re-export."
+_SIDE_EFFECT_NOTE = "Import may run the submodule for its side effects."
+REEXPORT_NOTE = _REEXPORT_NOTE
+SIDE_EFFECT_NOTE = _SIDE_EFFECT_NOTE
+PROBE_NOTE = _PROBE_NOTE
 _CAPPED_RULES = {
     "UNUSED_FUNCTION",
     "UNUSED_CLASS",
@@ -64,6 +69,7 @@ def apply_confidence(findings: list[Finding], indexes: list[FileIndex], root: Pa
             finding = replace(
                 finding,
                 confidence=cap,
+                status=_lowered_status(finding.status),
                 evidence=_with_note(finding.evidence, _MODULE_CAP_NOTE),
             )
         capped.append(finding)
@@ -88,6 +94,20 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
             )
         if index is not None and _import_dynamic(index):
             return replace(finding, confidence=70, status="POSSIBLY_DEAD")
+        if index is not None and _side_effect_import(index, finding):
+            return replace(
+                finding,
+                confidence=70,
+                status="POSSIBLY_DEAD",
+                evidence=_with_note(finding.evidence, _SIDE_EFFECT_NOTE),
+            )
+        if _package_init(finding.path):
+            return replace(
+                finding,
+                confidence=70,
+                status="POSSIBLY_DEAD",
+                evidence=_with_note(finding.evidence, _REEXPORT_NOTE),
+            )
         return finding
     if _symbol_dynamic(finding, index):
         return replace(
@@ -149,7 +169,35 @@ def _alembic(finding: Finding) -> Finding:
         return finding
     if finding.rule not in _CAPPED_RULES or finding.confidence <= 70:
         return finding
-    return replace(finding, confidence=70, evidence=_with_note(finding.evidence, _ALEMBIC_NOTE))
+    return replace(
+        finding,
+        confidence=70,
+        status=_lowered_status(finding.status),
+        evidence=_with_note(finding.evidence, _ALEMBIC_NOTE),
+    )
+
+
+def _lowered_status(status: str) -> str:
+    if status == "DEAD":
+        return "POSSIBLY_DEAD"
+    return status
+
+
+def _package_init(path: str) -> bool:
+    name = path.replace("\\", "/")
+    return name == "__init__.py" or name.endswith("/__init__.py")
+
+
+def _side_effect_import(index: FileIndex, finding: Finding) -> bool:
+    for edge in index.imports:
+        if edge.line != finding.line or edge.imported_name:
+            continue
+        module = edge.module or ""
+        if "." not in module:
+            continue
+        if edge.alias == finding.symbol:
+            return True
+    return False
 
 
 def _with_note(evidence: tuple[str, ...], note: str) -> tuple[str, ...]:

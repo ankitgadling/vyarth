@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 from vyarth.model import (
     INDEX_VERSION,
@@ -27,25 +28,29 @@ from vyarth.model import (
 
 
 def changed_python_files(root: Path, ref: str = "HEAD") -> set[str]:
-    """Python paths changed relative to `ref`. Raises RuntimeError when git cannot answer."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", ref],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
+    """Python paths changed relative to `ref`, including untracked files.
+
+    Paths are relative to `root`. `root` may sit below the git repository.
+    Raises RuntimeError when git cannot answer.
+    """
+    prefix = _git_prefix(root)
+    diff_paths = _git_lines(root, ["git", "diff", "--name-only", ref])
+    untracked = _git_lines(root, ["git", "ls-files", "--others", "--exclude-standard", "--full-name"])
+    mapped: set[str] = set()
+    saw_python = False
+    for path in (*diff_paths, *untracked):
+        if not path.endswith(".py"):
+            continue
+        saw_python = True
+        relative = _strip_git_prefix(path, prefix)
+        if relative is not None:
+            mapped.add(relative)
+    if saw_python and not mapped:
+        print(
+            "warning: git reported Python changes, but none are inside this project",
+            file=sys.stderr,
         )
-    except OSError as exc:
-        raise RuntimeError(f"git diff failed: {exc}") from exc
-    if result.returncode != 0:
-        message = result.stderr.strip() or "git diff failed"
-        raise RuntimeError(message)
-    return {
-        line.strip().replace("\\", "/")
-        for line in result.stdout.splitlines()
-        if line.strip().endswith(".py")
-    }
+    return mapped
 
 
 def load_cached(root: Path, relpath: str, stamp: str) -> FileIndex | None:
@@ -68,6 +73,7 @@ def load_cached(root: Path, relpath: str, stamp: str) -> FileIndex | None:
 
 
 def store_cached(root: Path, relpath: str, stamp: str, index: FileIndex) -> None:
+    ensure_cache_markers(root)
     path = _cache_path(root, relpath)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"stamp": stamp, "index": asdict(index)}
@@ -75,8 +81,90 @@ def store_cached(root: Path, relpath: str, stamp: str, index: FileIndex) -> None
 
 
 def cache_stamp(size: int, mtime_ns: int, fold: dict[str, str], duplicate_min_statements: int = 5) -> str:
+    from vyarth import __version__
+
     folded = json.dumps(sorted(fold.items()), separators=(",", ":"))
-    return f"{INDEX_VERSION}:{duplicate_min_statements}:{size}:{mtime_ns}:{folded}"
+    return f"{__version__}:{INDEX_VERSION}:{duplicate_min_statements}:{size}:{mtime_ns}:{folded}"
+
+
+def ensure_cache_markers(root: Path) -> None:
+    """Write the files that keep `.vyarth` out of git status."""
+    directory = root / ".vyarth"
+    directory.mkdir(parents=True, exist_ok=True)
+    gitignore = directory / ".gitignore"
+    if not gitignore.is_file():
+        gitignore.write_text("*\n", encoding="utf-8")
+    tag = directory / "CACHEDIR.TAG"
+    if not tag.is_file():
+        tag.write_text(
+            "Signature: 8a477f597d28d172789f06886806bc55\n"
+            "# This file is a cache directory tag created by vyarth.\n"
+            "# For information about cache directory tags, see:\n"
+            "#\thttps://bford.info/cachedir/\n",
+            encoding="utf-8",
+        )
+
+
+def prune_cache(root: Path, live_paths: set[str]) -> None:
+    """Delete cache records for files that this directory scan did not index."""
+    cache = root / ".vyarth" / "cache"
+    if not cache.is_dir():
+        return
+    live = {str(Path(path)) for path in live_paths}
+    for file in cache.rglob("*.json"):
+        try:
+            payload = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            file.unlink(missing_ok=True)
+            continue
+        index = payload.get("index") if isinstance(payload, dict) else None
+        stored = index.get("path") if isinstance(index, dict) else None
+        if not isinstance(stored, str) or stored not in live:
+            file.unlink(missing_ok=True)
+
+
+def _git_prefix(root: Path) -> str:
+    text = _git_output(root, ["git", "rev-parse", "--show-prefix"]).strip().replace("\\", "/")
+    if text and not text.endswith("/"):
+        text += "/"
+    return text
+
+
+def _strip_git_prefix(path: str, prefix: str) -> str | None:
+    if prefix:
+        if not path.startswith(prefix):
+            return None
+        relative = path[len(prefix) :]
+    else:
+        relative = path
+    if not relative or relative.startswith("../") or ".." in Path(relative).parts:
+        return None
+    return relative
+
+
+def _git_lines(root: Path, args: list[str]) -> list[str]:
+    return [
+        line.strip().replace("\\", "/")
+        for line in _git_output(root, args).splitlines()
+        if line.strip()
+    ]
+
+
+def _git_output(root: Path, args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"git diff failed: {exc}") from exc
+    if result.returncode != 0:
+        message = result.stderr.strip() or "git diff failed"
+        raise RuntimeError(message)
+    return result.stdout
 
 
 def _cache_path(root: Path, relpath: str) -> Path:
