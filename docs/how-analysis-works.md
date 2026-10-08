@@ -53,7 +53,7 @@ Inside a reached module, a symbol is alive when any of these is true:
 - an entry decorator or an entry name marks it
 - another module imports it and then loads that import
 
-Aliases are followed. `alias = func` and then `alias()` reaches `func`. `pkg.api.func()` reaches `func` when `pkg.api` resolves to a project module. `types.Name` reaches `Name` when `types` is a project submodule. `self.handler = func` and a later `self.handler()` reach `func`. `make().run()` reaches `Widget.run` when `make` is annotated `-> Widget`. A call on a parameter annotated as a class reaches that method. The body of a `@property` or `@cached_property` on a used class is walked. A reached method call also reaches an override of that method on a known subclass.
+Aliases are followed. `alias = func` and then `alias()` reaches `func`. `pkg.api.func()` reaches `func` when `pkg.api` resolves to a project module. `types.Name` reaches `Name` when `types` is a project submodule. `self.handler = func` and a later `self.handler()` reach `func`. `make().run()` reaches `Widget.run` when `make` is annotated `-> Widget`. `Widget().run()` reaches `Widget.run` as well. A call on a parameter annotated as a class reaches that method. The body of a `@property` or `@cached_property` on a used class is walked. A reached method call also reaches an override of that method on a known subclass.
 
 A list or tuple of functions records those functions in order. A later constant subscript calls that element. A loop, or an unknown index, calls every element. A store with no later call still counts as a use, and the stored function’s body is still walked.
 

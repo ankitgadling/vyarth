@@ -52,11 +52,17 @@ _IMPORT_ALIAS = {
 }
 
 
-def dependency_findings(indexes: list[FileIndex], root: Path) -> tuple[list[Finding], list[ParseError]]:
+def dependency_findings(
+    indexes: list[FileIndex],
+    root: Path,
+    within: Path | None = None,
+) -> tuple[list[Finding], list[ParseError]]:
     imported = {_canonical(_top_level(name)) for name in _import_roots(indexes)}
     declared: dict[str, tuple[str, int, bool]] = {}
     errors: list[ParseError] = []
     for manifest, packages, error in _declared(root):
+        if not _manifest_in_scan(manifest, root, within):
+            continue
         if error is not None:
             errors.append(error)
         relpath = manifest.relative_to(root).as_posix()
@@ -97,6 +103,18 @@ def dependency_findings(indexes: list[FileIndex], root: Path) -> tuple[list[Find
             )
         )
     return findings, errors
+
+
+def _manifest_in_scan(path: Path, root: Path, within: Path | None) -> bool:
+    """Keep manifests inside the scanned directory, plus files that sit in the project root.
+
+    A `vyarth scan src` still sees the root `pyproject.toml`. It does not see
+    `examples/requirements.txt`.
+    """
+    resolved = path.resolve()
+    if within is None or resolved.is_relative_to(within.resolve()):
+        return True
+    return resolved.parent == root.resolve()
 
 
 def _import_roots(indexes: list[FileIndex]) -> set[str]:

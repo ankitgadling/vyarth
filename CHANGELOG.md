@@ -10,6 +10,9 @@
 - Honors `# noqa` and `# noqa: F401` on an import statement, including a note after the code. A `# noqa` on the previous line does not apply.
 - Reports an import inside `try`/`except ImportError` or `ModuleNotFoundError` at 70% instead of hiding it.
 - Maps `OpenSSL` to `pyopenssl`. A package declared only as a development or docs dependency scores 70%, including a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, or `lint`.
+- Treats the first argument of `cast("Fraction", value)` as a use of that name.
+- Reaches `visit_*` methods on a used `NodeVisitor` or `NodeTransformer`. `Widget().run()` reaches `Widget.run`.
+- A subdirectory scan no longer reports dependency manifests that live outside that directory, such as `examples/requirements.txt`. Manifests in the project root still count.
 
 ## 0.1.0
 

@@ -25,7 +25,7 @@ A load is a read: a call, a decorator, passing the name as a value, or using it 
 
 The name `_` and dunder names such as `__all__` are not reported. Parameters are indexed and not reported.
 
-`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, the first argument of `Annotated`, or a `|` expression does too. A string inside `Literal`, or later `Annotated` metadata, does not.
+`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, the first argument of `Annotated`, or a `|` expression does too. So does the first argument of `cast("Fraction", value)`. A string inside `Literal`, or later `Annotated` metadata, does not.
 
 A name listed in `__all__` is used. So is a name that another project module imports and then loads: a call, an annotation, or another `__all__` entry. An import that nothing in the importing file loads does not keep the original definition alive. Passing a function as a value (`handlers.append(foo)`) is a use.
 
@@ -41,7 +41,7 @@ A module-level function or class with no references is `POSSIBLY_DEAD` at 96% wh
 
 A nested function with no dynamic name and no decorator stays at 100%.
 
-An unreferenced method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
+An unreferenced method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
 
 A decorator that is not a recognized entry lowers the score to 75%, including a nested function. `@property`, `@staticmethod`, and `@classmethod` are recorded and are not entries by themselves. See [How analysis works](how-analysis-works.md) for the decorator list.
 
@@ -94,7 +94,7 @@ The package `python` is skipped. Requirement lines that are comments, `-r`, `-c`
 
 These install names match their import names and are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, `beautifulsoup4` / `bs4`, `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose`. A package declared only in a development or docs manifest (`requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, or a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`) stays reported at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package with no matching import stays at 95%, with the message `No Python imports found.`
 
-Scanning a single file skips this rule. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
+Scanning a single file skips this rule. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt`. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
 
 ## `DUPLICATE_CODE`
 

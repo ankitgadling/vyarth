@@ -47,14 +47,17 @@ def _edges_for_call(project: Project, index: FileIndex, call: CallEdge) -> list[
         if target:
             edges.append(_edge(call, target))
     if call.callee.startswith("@call:"):
+        owner = call.callee[len("@call:") :]
         target = _annotated_method(
             project,
             index,
-            call.callee[len("@call:") :],
+            owner,
             call.callee_name,
             call.caller,
             binding_map,
         )
+        if not target:
+            target = _constructor_method(binding_map, owner, call.callee_name)
         if target:
             edges.append(_edge(call, target))
     if call.callee.startswith("@recv:"):
@@ -280,6 +283,23 @@ def _self_store(index: FileIndex, caller: str, attr: str) -> str:
         if same_method or same_class:
             found = bind.source
     return found
+
+
+def _constructor_method(binding_map: dict[str, Binding], function_name: str, method: str) -> str:
+    """`Widget().run()` reaches `Widget.run` without a return annotation."""
+    if not method:
+        return ""
+    binding = binding_map.get(function_name)
+    if binding is None:
+        return ""
+    if binding.kind == "class":
+        qualname = f"{binding.qualname}.{method}"
+        if qualname in binding_map:
+            return qualname
+        return ""
+    if binding.kind == "import":
+        return f"@import:{binding.qualname}.{method}"
+    return ""
 
 
 def _annotated_method(

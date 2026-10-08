@@ -958,6 +958,95 @@ def test_dev_only_dependency_scores_70(tmp_path):
     assert findings["pytest"].confidence == 70
 
 
+def test_cast_string_keeps_the_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, cast\n"
+        "if TYPE_CHECKING:\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        "def main(value):\n"
+        "    return cast('Fraction', value)\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main(1)\n",
+        encoding="utf-8",
+    )
+    assert "Fraction" not in {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    assert "Fraction" in path.read_text(encoding="utf-8")
+
+
+def test_constructor_call_reaches_the_method(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "class Widget:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "def main():\n"
+        "    return Widget().run()\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    assert "run" not in {finding.symbol for finding in scan(tmp_path).findings}
+
+
+def test_node_visitor_methods_are_reached(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "walk.py": (
+                "import ast\n"
+                "\n"
+                "class Walker(ast.NodeVisitor):\n"
+                "    def visit_Name(self, node):\n"
+                "        return helper(node)\n"
+                "\n"
+                "def helper(node):\n"
+                "    return node.id\n"
+                "\n"
+                "def main():\n"
+                "    Walker().visit(ast.parse('x'))\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+            "pages.py": (
+                "class Page:\n"
+                "    def visit_page(self):\n"
+                "        return 1\n"
+                "\n"
+                "def main():\n"
+                "    return Page()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    found = {(finding.rule, finding.symbol) for finding in scan(tmp_path).findings}
+    assert ("UNUSED_FUNCTION", "visit_Name") not in found
+    assert ("ORPHAN_FUNCTION", "helper") not in found
+    assert ("UNUSED_FUNCTION", "visit_page") in found
+
+
+def test_subdirectory_scan_ignores_manifests_outside_it(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'app'\nversion = '0.1'\ndependencies = ['pathspec']\n",
+            "src/app.py": "def main():\n    return 1\n",
+            "examples/requirements.txt": "requests\n",
+        },
+    )
+    findings = [item for item in scan(tmp_path / "src").findings if item.rule == "UNUSED_DEPENDENCY"]
+    assert {item.symbol for item in findings} == {"pathspec"}
+    assert all(not item.path.startswith("examples/") for item in findings)
+
+
 def test_literal_string_does_not_hide_an_unused_variable(tmp_path):
     path = tmp_path / "app.py"
     path.write_text(

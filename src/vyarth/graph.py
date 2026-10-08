@@ -23,6 +23,7 @@ _VISITOR_CALLS = {"visit", "generic_visit"}
 _PROPERTY_DECORATORS = {"property", "cached_property", "setter", "deleter"}
 _WALKED_PROPERTIES = {"property", "cached_property"}
 _ENUM_BASES = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
+_VISITOR_BASES = {"NodeVisitor", "NodeTransformer"}
 _FIELD_DECORATORS = {"dataclass", "define"}
 _FIELD_NAMES = {
     "attr.s",
@@ -388,6 +389,15 @@ def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[s
                 if owner == class_name:
                     add(path, item.qualname)
 
+    def add_visitors() -> None:
+        """`ast.NodeVisitor.visit` dispatches to `visit_*` by node name."""
+        for path, class_name in referenced_classes(project, reachable):
+            methods = project.visitors.get((path, class_name))
+            if not methods or not _visitor_class(project, path, class_name):
+                continue
+            for qualname in methods:
+                add(path, qualname)
+
     subclasses: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for index in project.indexes:
         for class_name, bases in index.class_bases:
@@ -437,6 +447,7 @@ def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[s
         before = len(reachable)
         add_unique_methods()
         add_properties()
+        add_visitors()
         if len(reachable) != before:
             progress = True
     return reachable, unresolved
@@ -605,6 +616,19 @@ def _decorated(index: FileIndex, qualname: str, names: set[str]) -> bool:
         if item.qualname == qualname and item.name.rsplit(".", 1)[-1] in names:
             return True
     return False
+
+
+def _visitor_class(project: Project, path: str, class_name: str) -> bool:
+    index = project.by_path.get(path)
+    if index is None:
+        return False
+    for name, bases in index.class_bases:
+        if name != class_name:
+            continue
+        if any(_base_leaf(base) in _VISITOR_BASES for base in bases):
+            return True
+    bindings = project.bindings.get(path, {})
+    return any(f"{class_name}.{method}" in bindings for method in _VISITOR_CALLS)
 
 
 def _enum_class(index: FileIndex, qualname: str) -> bool:

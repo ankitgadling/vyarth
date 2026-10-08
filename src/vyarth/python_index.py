@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 
+from vyarth.backend import AnalysisBackend
 from vyarth.ignore import collect_ignores, expand_decorator_ignores, import_noqa_ignores
 from vyarth.model import (
     BodyHash,
@@ -418,11 +419,12 @@ class _Indexer(ast.NodeVisitor):
             self._note_all_mutation(node)
         mutation = _container_mutation(node)
         self._note_call(node)
+        cast_type = self._visit_cast_type(node)
         if mutation is not None:
             name, slots, mode, index, parts = mutation
             self._visit_container_parts(parts)
             for argument in node.args:
-                if argument not in parts:
+                if argument is not cast_type and argument not in parts:
                     self.visit(argument)
             for keyword in node.keywords:
                 if keyword.value is not None:
@@ -430,10 +432,18 @@ class _Indexer(ast.NodeVisitor):
             self._remember_container(name, slots, mode, node.lineno, index)
             return
         for argument in node.args:
-            self.visit(argument)
+            if argument is not cast_type:
+                self.visit(argument)
         for keyword in node.keywords:
             if keyword.value is not None:
                 self.visit(keyword.value)
+
+    def _visit_cast_type(self, node: ast.Call) -> ast.expr | None:
+        """`cast("Fraction", value)` uses `Fraction`, including a quoted forward reference."""
+        if not _is_cast_call(node.func) or not node.args:
+            return None
+        self._visit_annotation(node.args[0])
+        return node.args[0]
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Load):
@@ -1117,6 +1127,14 @@ def _is_annotated(node: ast.expr) -> bool:
     return _form_name(node) == "Annotated"
 
 
+def _is_cast_call(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "cast"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "cast"
+    return False
+
+
 def _catches_import_error(handlers: list[ast.ExceptHandler]) -> bool:
     return any(_exception_names(handler.type) & _IMPORT_ERRORS for handler in handlers if handler.type is not None)
 
@@ -1134,7 +1152,7 @@ def _exception_names(node: ast.expr) -> set[str]:
     return set()
 
 
-class PythonAstBackend:
+class PythonAstBackend(AnalysisBackend):
     """Stdlib `ast` backend. A future backend only has to return the same FileIndex."""
 
     def index_source(
