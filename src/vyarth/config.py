@@ -12,6 +12,8 @@ DEFAULT_ENTRY_PATTERNS: tuple[str, ...] = (
     "**/wsgi.py",
     "**/asgi.py",
     "**/manage.py",
+    "setup.py",
+    "**/docs/conf.py",
 )
 
 DEFAULT_EXCLUDES: tuple[str, ...] = (

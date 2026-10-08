@@ -7,7 +7,6 @@ from dataclasses import replace
 import os
 from pathlib import Path
 
-from vyarth.backend import AnalysisBackend
 from vyarth.baseline import filter_baselined, load_baseline
 from vyarth.confidence import apply_confidence
 from vyarth.config import Config, load_config
@@ -81,7 +80,7 @@ def scan(
     findings = collect_findings(indexes, root, config, check_modules=not single_file, progress=progress)
     _status(progress, "checking dependencies")
     if not single_file:
-        dep_findings, dep_errors = dependency_findings(indexes, root)
+        dep_findings, dep_errors = dependency_findings(indexes, root, within=requested)
         findings.extend(dep_findings)
         errors.extend(dep_errors)
     _status(progress, "checking duplicate code")
@@ -163,7 +162,7 @@ def _index_files(
     return indexes, errors
 
 
-def _backend() -> AnalysisBackend:
+def _backend() -> PythonAstBackend:
     return PythonAstBackend()
 
 

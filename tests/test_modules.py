@@ -159,6 +159,55 @@ def test_an_unused_import_does_not_keep_the_definition_alive(tmp_path):
     assert ("UNUSED_IMPORT", "pkg/other.py", "dead") in found
 
 
+def test_explicit_reexport_keeps_the_class(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pkg/__init__.py": "from .core import Widget as Widget\n",
+            "pkg/core.py": "class Widget:\n    pass\n",
+            "main.py": "import pkg\nif __name__ == '__main__':\n    print(pkg)\n",
+        },
+    )
+    assert not any(finding.symbol == "Widget" for finding in scan(tmp_path).findings)
+
+
+def test_attribute_on_an_imported_module_keeps_the_class(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/types.py": "class OptionHelpExtra:\n    pass\n",
+            "pkg/core.py": (
+                "from . import types\n"
+                "\n"
+                "def show() -> types.OptionHelpExtra:\n"
+                "    return types.OptionHelpExtra()\n"
+            ),
+            "main.py": "from pkg.core import show\nif __name__ == '__main__':\n    show()\n",
+        },
+    )
+    assert "OptionHelpExtra" not in {finding.symbol for finding in scan(tmp_path).findings}
+
+
+def test_setup_py_and_docs_conf_are_entries(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "setup.py": "import helper\nhelper.run()\n",
+            "helper.py": "def run():\n    return 1\n",
+            "docs/conf.py": "import theme\ntheme.load()\n",
+            "theme.py": "def load():\n    return 1\n",
+        },
+    )
+    result = scan(tmp_path)
+    symbols = {finding.symbol for finding in result.findings}
+    assert "run" not in symbols
+    assert "load" not in symbols
+    unused = {finding.path for finding in result.findings if finding.rule == "POSSIBLY_UNUSED_MODULE"}
+    assert "setup.py" not in unused
+    assert "docs/conf.py" not in unused
+
+
 def test_all_reexport_counts_as_a_use(tmp_path):
     write_tree(
         tmp_path,

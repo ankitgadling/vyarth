@@ -13,6 +13,8 @@ from vyarth.model import FileIndex, Finding, ParseError, make_fingerprint
 
 _NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
 _MESSAGE = "No Python imports found."
+_DEV_EVIDENCE = "Declared in {path} as a development or docs dependency and never imported."
+_DEV_EXTRAS = {"dev", "test", "tests", "docs", "doc", "lint"}
 _CANONICAL = {
     "pil": "pillow",
     "pillow": "pillow",
@@ -25,6 +27,8 @@ _CANONICAL = {
     "opencv-python-headless": "opencv-python",
     "bs4": "beautifulsoup4",
     "beautifulsoup4": "beautifulsoup4",
+    "openssl": "pyopenssl",
+    "pyopenssl": "pyopenssl",
 }
 _MANIFESTS = {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile", "setup.py"}
 _SKIP_DIRS = {
@@ -48,28 +52,39 @@ _IMPORT_ALIAS = {
 }
 
 
-def dependency_findings(indexes: list[FileIndex], root: Path) -> tuple[list[Finding], list[ParseError]]:
+def dependency_findings(
+    indexes: list[FileIndex],
+    root: Path,
+    within: Path | None = None,
+) -> tuple[list[Finding], list[ParseError]]:
     imported = {_canonical(_top_level(name)) for name in _import_roots(indexes)}
-    declared: dict[str, tuple[str, int]] = {}
+    declared: dict[str, tuple[str, int, bool]] = {}
     errors: list[ParseError] = []
     for manifest, packages, error in _declared(root):
+        if not _manifest_in_scan(manifest, root, within):
+            continue
         if error is not None:
             errors.append(error)
         relpath = manifest.relative_to(root).as_posix()
-        for name, line in packages:
+        for name, line, dev in packages:
             key = _canonical(name)
             if not key or key == "python":
                 continue
-            declared.setdefault(key, (relpath, line))
+            current = declared.get(key)
+            if current is None or (current[2] and not dev):
+                declared[key] = (relpath, line, dev)
     findings: list[Finding] = []
     for name in sorted(declared):
         if name in imported:
             continue
-        relpath, line = declared[name]
+        relpath, line, dev = declared[name]
         alias = _IMPORT_ALIAS.get(name)
         if alias is not None and alias in imported:
             confidence = 70
             evidence = (f"Imported as {alias}, so the package name cannot be proved unused.",)
+        elif dev:
+            confidence = 70
+            evidence = (_DEV_EVIDENCE.format(path=relpath),)
         else:
             confidence = 95
             evidence = (f"Declared in {relpath} and never imported.",)
@@ -88,6 +103,18 @@ def dependency_findings(indexes: list[FileIndex], root: Path) -> tuple[list[Find
             )
         )
     return findings, errors
+
+
+def _manifest_in_scan(path: Path, root: Path, within: Path | None) -> bool:
+    """Keep manifests inside the scanned directory, plus files that sit in the project root.
+
+    A `vyarth scan src` still sees the root `pyproject.toml`. It does not see
+    `examples/requirements.txt`.
+    """
+    resolved = path.resolve()
+    if within is None or resolved.is_relative_to(within.resolve()):
+        return True
+    return resolved.parent == root.resolve()
 
 
 def _import_roots(indexes: list[FileIndex]) -> set[str]:
@@ -113,8 +140,8 @@ def _canonical(name: str) -> str:
     return _CANONICAL.get(normalized, normalized)
 
 
-def _declared(root: Path) -> list[tuple[Path, list[tuple[str, int]], ParseError | None]]:
-    found: list[tuple[Path, list[tuple[str, int]], ParseError | None]] = []
+def _declared(root: Path) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
+    found: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
     root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS and not name.endswith(".egg-info")]
@@ -127,16 +154,18 @@ def _declared(root: Path) -> list[tuple[Path, list[tuple[str, int]], ParseError 
     return found
 
 
-def _read_manifest(path: Path, root: Path) -> tuple[list[tuple[str, int]], ParseError | None]:
+def _read_manifest(path: Path, root: Path) -> tuple[list[tuple[str, int, bool]], ParseError | None]:
     try:
-        if path.name in {"requirements.txt", "requirements-dev.txt"}:
-            return _requirements(path), None
+        if path.name == "requirements.txt":
+            return _tag(_requirements(path), _docs_requirements(path, root)), None
+        if path.name == "requirements-dev.txt":
+            return _tag(_requirements(path), True), None
         if path.name == "pyproject.toml":
             return _pyproject(path), None
         if path.name == "Pipfile":
             return _pipfile(path), None
         if path.name == "setup.py":
-            return _setup(path), None
+            return _tag(_setup(path), False), None
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError, ValueError) as exc:
         relative = path.resolve().relative_to(root).as_posix()
         return [], ParseError(path=relative, line=1, column=1, message=str(exc))
@@ -155,45 +184,60 @@ def _requirements(path: Path) -> list[tuple[str, int]]:
     return packages
 
 
-def _pyproject(path: Path) -> list[tuple[str, int]]:
+def _docs_requirements(path: Path, root: Path) -> bool:
+    relative = path.resolve().relative_to(root.resolve())
+    return relative.name == "requirements.txt" and "docs" in relative.parts
+
+
+def _dev_extra(name: str) -> bool:
+    """True for optional-dependency groups that install tools, not runtime packages."""
+    normalized = str(name).strip().lower().replace("_", "-")
+    return normalized in _DEV_EXTRAS or normalized.endswith("-dev")
+
+
+def _tag(packages: list[tuple[str, int]], dev: bool) -> list[tuple[str, int, bool]]:
+    return [(name, line, dev) for name, line in packages]
+
+
+def _pyproject(path: Path) -> list[tuple[str, int, bool]]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
     lines = path.read_text(encoding="utf-8").splitlines()
-    packages: list[tuple[str, int]] = []
+    packages: list[tuple[str, int, bool]] = []
     project = data.get("project", {})
     if isinstance(project, dict):
-        packages.extend(_requirement_list(project.get("dependencies"), lines))
+        packages.extend(_tag(_requirement_list(project.get("dependencies"), lines), False))
         optional = project.get("optional-dependencies", {})
         if isinstance(optional, dict):
-            for group in optional.values():
-                packages.extend(_requirement_list(group, lines))
+            for group_name, group in optional.items():
+                packages.extend(_tag(_requirement_list(group, lines), _dev_extra(group_name)))
     poetry = data.get("tool", {})
     if isinstance(poetry, dict):
         poetry_table = poetry.get("poetry", {})
         if isinstance(poetry_table, dict):
-            packages.extend(_toml_keys(poetry_table.get("dependencies"), lines))
+            packages.extend(_tag(_toml_keys(poetry_table.get("dependencies"), lines), False))
             groups = poetry_table.get("group", {})
             if isinstance(groups, dict):
                 for group in groups.values():
                     if isinstance(group, dict):
-                        packages.extend(_toml_keys(group.get("dependencies"), lines))
+                        packages.extend(_tag(_toml_keys(group.get("dependencies"), lines), True))
         uv_table = poetry.get("uv", {})
         if isinstance(uv_table, dict):
-            packages.extend(_requirement_list(uv_table.get("dev-dependencies"), lines))
+            packages.extend(_tag(_requirement_list(uv_table.get("dev-dependencies"), lines), True))
     groups = data.get("dependency-groups", {})
     if isinstance(groups, dict):
         for group in groups.values():
-            packages.extend(_requirement_list(group, lines))
+            packages.extend(_tag(_requirement_list(group, lines), True))
     return packages
 
 
-def _pipfile(path: Path) -> list[tuple[str, int]]:
+def _pipfile(path: Path) -> list[tuple[str, int, bool]]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
     lines = path.read_text(encoding="utf-8").splitlines()
-    packages: list[tuple[str, int]] = []
-    for key in ("packages", "dev-packages"):
-        packages.extend(_toml_keys(data.get(key), lines))
+    packages: list[tuple[str, int, bool]] = []
+    packages.extend(_tag(_toml_keys(data.get("packages"), lines), False))
+    packages.extend(_tag(_toml_keys(data.get("dev-packages"), lines), True))
     return packages
 
 

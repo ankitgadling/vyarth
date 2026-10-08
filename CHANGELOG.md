@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Counts `from module import Name as Name` as a public re-export, follows an attribute on an imported submodule, and reads a quoted name inside `Union`, `Optional`, the first argument of `Annotated`, and a `|` expression.
+- Skips members of `Enum`, `IntEnum`, `StrEnum`, `Flag`, and `IntFlag`. Methods on those classes are still reported.
+- Walks `@property` and `@cached_property` bodies on a used class, follows a typed cross-module call, and reaches an override of a reached method.
+- Treats `setup.py` and `docs/conf.py` as entry modules.
+- Leaves the only `yield` or `yield from` in a function in place when fixing unreachable code.
+- Honors `# noqa` and `# noqa: F401` on an import statement, including a note after the code. A `# noqa` on the previous line does not apply.
+- Reports an import inside `try`/`except ImportError` or `ModuleNotFoundError` at 70% instead of hiding it.
+- Maps `OpenSSL` to `pyopenssl`. A package declared only as a development or docs dependency scores 70%, including a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, or `lint`.
+- Treats the first argument of `cast("Fraction", value)` as a use of that name.
+- Reaches `visit_*` methods on a used `NodeVisitor` or `NodeTransformer`. `Widget().run()` reaches `Widget.run`.
+- A subdirectory scan no longer reports dependency manifests that live outside that directory, such as `examples/requirements.txt`. Manifests in the project root still count.
+
 ## 0.1.0
 
 First release of Vyarth, a scope-aware detector for unused Python code.

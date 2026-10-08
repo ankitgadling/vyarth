@@ -26,10 +26,10 @@ At confidence 80, Vulture's other output was 31 unused variables in Flask and 8 
 
 `from datetime import datetime` in Flask's tutorial `examples/tutorial/flaskr/db.py` is used only inside `sqlite3.register_converter("timestamp", lambda v: datetime.fromisoformat(...))`. That load now counts, so the import is kept. A function or class named only as the callee of an uncalled lambda still does not count as reached.
 
-`import socket` in `requests/adapters.py` is marked `# noqa: F401` and is not otherwise loaded. Vyarth reports it at confidence 100. Vulture does not. The comment says the import is intentionally unused.
+`import socket` in `requests/adapters.py` is marked `# noqa: F401` and is not otherwise loaded. Vyarth honors that comment and does not report the import. Vulture does not either. The comment says the import is intentionally unused.
 
 `MockRequest.get_full_url` and the other methods next to it in `requests/cookies.py` copy the `urllib.request.Request` surface that `http.cookiejar` calls. Nothing in the requests checkout loads those names. Vyarth reports them as unused functions at 96. Vulture does not.
 
-Vulture reports `quote_plus`, `unquote_plus`, and `urldefrag` in `requests/compat.py` as unused imports at 90. They are legacy names re-exported for old callers and are not loaded inside the checkout. Vyarth reports the same kind of unused import elsewhere in requests, including `socket` above. The two tools do not list the same import lines.
+Vulture reports `quote_plus`, `unquote_plus`, and `urldefrag` in `requests/compat.py` as unused imports at 90. They are legacy names re-exported for old callers and are not loaded inside the checkout. Vyarth reports the same kind of unused import elsewhere in requests. The two tools do not list the same import lines.
 
 Public methods such as `Flask.send_static_file` are in Vyarth's unused-function count when the checkout never loads them. Vulture's run did not list those methods. That gap, not a labeled sample of every finding, is why this page does not state a false-positive rate.

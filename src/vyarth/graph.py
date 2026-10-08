@@ -21,6 +21,9 @@ _VARIABLE_MESSAGE = "Variable '{name}' is never used."
 _UNRESOLVED_NOTE = "An unresolved attribute call uses this name."
 _VISITOR_CALLS = {"visit", "generic_visit"}
 _PROPERTY_DECORATORS = {"property", "cached_property", "setter", "deleter"}
+_WALKED_PROPERTIES = {"property", "cached_property"}
+_ENUM_BASES = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
+_VISITOR_BASES = {"NodeVisitor", "NodeTransformer"}
 _FIELD_DECORATORS = {"dataclass", "define"}
 _FIELD_NAMES = {
     "attr.s",
@@ -163,7 +166,7 @@ def class_attribute_findings(
             if _silent_name(binding.name):
                 continue
             class_name = binding.qualname.rsplit(".", 1)[0]
-            if _field_class(index, class_name):
+            if _field_class(index, class_name) or _enum_class(index, class_name):
                 continue
             class_binding = classes.get(class_name)
             if class_binding is None or not _class_used(index, class_binding, referenced, reachable):
@@ -233,6 +236,18 @@ def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[s
             return
         queued.add(resolved)
         queue.append(resolved)
+        _mark_overrides(resolved)
+
+    def _mark_overrides(resolved: tuple[str, str]) -> None:
+        path, qualname = resolved
+        binding = project.bindings.get(path, {}).get(qualname)
+        if binding is None or binding.kind != "function" or "." not in qualname:
+            return
+        class_name, method = qualname.rsplit(".", 1)
+        for sub_path, sub_class in subclasses.get((path, class_name), ()):
+            override = f"{sub_class}.{method}"
+            if override in project.bindings.get(sub_path, {}):
+                add(sub_path, override)
 
     def touch(path: str, qualname: str) -> None:
         """Mark a stored function used without walking its body."""
@@ -361,6 +376,37 @@ def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[s
             if len(matches) == 1:
                 add(*matches[0])
 
+    def add_properties() -> None:
+        """Walk `@property` bodies on a used class so calls inside them count."""
+        for path, class_name in referenced_classes(project, reachable):
+            index = project.by_path.get(path)
+            if index is None:
+                continue
+            for item in index.decorators:
+                if item.name.rsplit(".", 1)[-1] not in _WALKED_PROPERTIES or "." not in item.qualname:
+                    continue
+                owner = item.qualname.rsplit(".", 1)[0]
+                if owner == class_name:
+                    add(path, item.qualname)
+
+    def add_visitors() -> None:
+        """`ast.NodeVisitor.visit` dispatches to `visit_*` by node name."""
+        for path, class_name in referenced_classes(project, reachable):
+            methods = project.visitors.get((path, class_name))
+            if not methods or not _visitor_class(project, path, class_name):
+                continue
+            for qualname in methods:
+                add(path, qualname)
+
+    subclasses: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for index in project.indexes:
+        for class_name, bases in index.class_bases:
+            for base in bases:
+                resolved = _resolve_base(index, base)
+                if resolved is None:
+                    continue
+                subclasses.setdefault(resolved, []).append((index.path, class_name))
+
     for path, qualname in entries.symbols:
         add(path, qualname)
     opened: set[tuple[str, str]] = set()
@@ -400,6 +446,8 @@ def _reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[s
                 consider(index, call)
         before = len(reachable)
         add_unique_methods()
+        add_properties()
+        add_visitors()
         if len(reachable) != before:
             progress = True
     return reachable, unresolved
@@ -458,11 +506,9 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
     edge = project.edge_for(index.path, binding.name, binding.line)
     if edge is None or edge.is_wildcard or edge.imported_name == "*":
         return None
+    module = import_target(edge.module, edge.level, Path(index.path), project.roots)
     if not edge.imported_name:
-        if not method or not edge.module:
-            return None
-        module = import_target(edge.module, edge.level, Path(index.path), project.roots)
-        if not module:
+        if not method or not module:
             return None
         target = project.by_module.get(module)
         if target is None:
@@ -471,7 +517,11 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
         if target_binding is None:
             return None
         return target.path, target_binding.qualname
-    module = import_target(edge.module, edge.level, Path(index.path), project.roots)
+    if module is None:
+        return None
+    submodule = _submodule_symbol(project, module, edge.imported_name, method)
+    if submodule is not None:
+        return submodule
     if not module:
         return None
     target = project.by_module.get(module)
@@ -483,6 +533,25 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
     if method:
         return target.path, f"{target_binding.qualname}.{method}"
     return target.path, target_binding.qualname
+
+
+def _submodule_symbol(
+    project: Project,
+    module: str,
+    imported_name: str,
+    method: str,
+) -> tuple[str, str] | None:
+    """`types.OptionHelpExtra` when `types` is a project submodule, not a class."""
+    if not method:
+        return None
+    child = f"{module}.{imported_name}" if module else imported_name
+    submodule = project.by_module.get(child)
+    if submodule is None:
+        return None
+    symbol = project.module_binding(submodule.path, method)
+    if symbol is None or symbol.scope_kind != "module":
+        return None
+    return submodule.path, symbol.qualname
 
 
 def _parse_xref(qualname: str) -> tuple[str, str] | None:
@@ -549,6 +618,29 @@ def _decorated(index: FileIndex, qualname: str, names: set[str]) -> bool:
     return False
 
 
+def _visitor_class(project: Project, path: str, class_name: str) -> bool:
+    index = project.by_path.get(path)
+    if index is None:
+        return False
+    for name, bases in index.class_bases:
+        if name != class_name:
+            continue
+        if any(_base_leaf(base) in _VISITOR_BASES for base in bases):
+            return True
+    bindings = project.bindings.get(path, {})
+    return any(f"{class_name}.{method}" in bindings for method in _VISITOR_CALLS)
+
+
+def _enum_class(index: FileIndex, qualname: str) -> bool:
+    for class_name, bases in index.class_bases:
+        if class_name != qualname:
+            continue
+        for base in bases:
+            if _base_leaf(base) in _ENUM_BASES:
+                return True
+    return False
+
+
 def _field_class(index: FileIndex, qualname: str) -> bool:
     for item in index.decorators:
         if item.qualname != qualname:
@@ -581,18 +673,18 @@ def _symbol_referenced(
     if _referenced(index, binding, referenced):
         return True
     qualname = binding.qualname
-    xref = f"@xref:{index.path}\x1f{qualname}"
     for (path, _), calls in project.calls_by_caller.items():
         for call in calls:
             if not call.resolved or not call.callee:
                 continue
-            if path == index.path and call.callee == qualname:
-                return True
-            if call.callee == xref:
+            resolved_path, resolved_name = _follow_imports(project, path, call.callee)
+            if resolved_path == index.path and resolved_name == qualname:
                 return True
     for (path, _), uses in project.value_uses.items():
-        if path == index.path and qualname in uses:
-            return True
+        for used in uses:
+            resolved_path, resolved_name = _follow_imports(project, path, used)
+            if resolved_path == index.path and resolved_name == qualname:
+                return True
     return False
 
 

@@ -107,12 +107,17 @@ def _index_from_dict(data: dict) -> FileIndex:
         unbound_names=tuple(data.get("unbound_names", ())),
         dynamic_imports=tuple(data.get("dynamic_imports", ())),
         container_stores=tuple(_container(item) for item in data.get("container_stores", ())),
+        import_probes=tuple(data.get("import_probes", ())),
     )
 
 
 def _ignore(item: dict) -> IgnoreDirective:
     rules = item.get("rules")
-    return IgnoreDirective(line=item["line"], rules=None if rules is None else tuple(rules))
+    return IgnoreDirective(
+        line=item["line"],
+        rules=None if rules is None else tuple(rules),
+        exact=bool(item.get("exact", False)),
+    )
 
 
 def _container(item: dict) -> ContainerStore:

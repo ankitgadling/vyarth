@@ -17,6 +17,11 @@ _IGNORE_RE = re.compile(
     r"vyarth\s*:\s*ignore(?:\s*\[\s*([^\]]*?)\s*\])?",
     re.IGNORECASE,
 )
+_NOQA_CODE = r"[A-Za-z]+[0-9]+"
+_NOQA_RE = re.compile(
+    rf"noqa\b(?:\s*:\s*({_NOQA_CODE}(?:\s*,\s*{_NOQA_CODE})*))?",
+    re.IGNORECASE,
+)
 
 
 def normalize_rule(rule: str) -> str:
@@ -47,6 +52,50 @@ def collect_ignores(source: str) -> tuple[IgnoreDirective, ...]:
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return ()
     return tuple(directives)
+
+
+def import_noqa_ignores(tree: ast.AST, source: str) -> tuple[IgnoreDirective, ...]:
+    """`# noqa` and `# noqa: F401` suppress unused imports on that statement.
+
+    The comment may sit on any line of the import, including a parenthesized
+    import. A `# noqa` on the previous line does not apply. Words after the
+    code, as in `# noqa: F401 kept for plugins`, are not part of the code.
+    """
+    lines = _noqa_import_lines(source)
+    if not lines:
+        return ()
+    extra: list[IgnoreDirective] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import | ast.ImportFrom):
+            continue
+        start = node.lineno
+        end = node.end_lineno or start
+        if not any(start <= line <= end for line in lines):
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            line = alias.lineno if isinstance(alias.lineno, int) else start
+            extra.append(IgnoreDirective(line=line, rules=("unused_import",), exact=True))
+    return tuple(extra)
+
+
+def _noqa_import_lines(source: str) -> set[int]:
+    found: set[int] = set()
+    try:
+        tokens = tokenize.generate_tokens(StringIO(source).readline)
+        for token in tokens:
+            if token.type != tokenize.COMMENT:
+                continue
+            match = _NOQA_RE.search(token.string)
+            if match is None:
+                continue
+            codes = match.group(1)
+            if codes is None or "F401" in {part.strip().upper() for part in codes.split(",") if part.strip()}:
+                found.add(token.start[0])
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return set()
+    return found
 
 
 def expand_decorator_ignores(tree: ast.AST, directives: tuple[IgnoreDirective, ...]) -> tuple[IgnoreDirective, ...]:
@@ -93,7 +142,10 @@ def apply_ignores(
 def _comment_suppresses(index: FileIndex, finding: Finding) -> bool:
     rule = normalize_rule(finding.rule)
     for directive in index.ignores:
-        if directive.line != finding.line and directive.line != finding.line - 1:
+        if directive.exact:
+            if directive.line != finding.line:
+                continue
+        elif directive.line != finding.line and directive.line != finding.line - 1:
             continue
         if directive.rules is None or rule in directive.rules:
             return True

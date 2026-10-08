@@ -722,3 +722,384 @@ def test_overlapping_fix_edits_apply_once(tmp_path):
     assert "def helper" in text
     assert "return 0" in text
     compile(text, "app.py", "exec")
+
+
+def test_quoted_union_alias_keeps_the_type_checking_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, Union\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        "URLTypes = Union['Decimal', str]\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "Decimal" not in unused
+    assert "Fraction" in unused
+
+
+def test_property_body_keeps_the_called_classmethod(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "codes.py": (
+                "class codes:\n"
+                "    @classmethod\n"
+                "    def is_informational(cls, value: int) -> bool:\n"
+                "        return value < 200\n"
+            ),
+            "models.py": (
+                "from codes import codes\n"
+                "\n"
+                "class Response:\n"
+                "    @property\n"
+                "    def is_informational(self) -> bool:\n"
+                "        return codes.is_informational(1)\n"
+            ),
+            "main.py": "from models import Response\nif __name__ == '__main__':\n    Response()\n",
+        },
+    )
+    assert "is_informational" not in {finding.symbol for finding in scan(tmp_path).findings}
+
+
+def test_override_of_a_reached_method_is_used(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "auth.py": (
+                "class Auth:\n"
+                "    def auth_flow(self):\n"
+                "        yield 1\n"
+                "\n"
+                "    def sync(self):\n"
+                "        return list(self.auth_flow())\n"
+                "\n"
+                "class BasicAuth(Auth):\n"
+                "    def auth_flow(self):\n"
+                "        yield 2\n"
+            ),
+            "main.py": "from auth import Auth\nif __name__ == '__main__':\n    Auth().sync()\n",
+        },
+    )
+    assert "auth_flow" not in {finding.symbol for finding in scan(tmp_path).findings}
+
+
+def test_unreached_typed_call_is_an_orphan(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "auth.py": (
+                "class Auth:\n"
+                "    def async_auth_flow(self, request):\n"
+                "        return request\n"
+            ),
+            "client.py": (
+                "from auth import Auth\n"
+                "\n"
+                "def send(auth: Auth):\n"
+                "    return auth.async_auth_flow(1)\n"
+            ),
+            "main.py": "import client\nif __name__ == '__main__':\n    print(client)\n",
+        },
+    )
+    found = {(finding.rule, finding.symbol) for finding in scan(tmp_path).findings}
+    assert ("UNUSED_FUNCTION", "async_auth_flow") not in found
+    assert ("ORPHAN_FUNCTION", "async_auth_flow") in found
+
+
+def test_enum_members_are_not_unused_attributes(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "codes.py": (
+                "from enum import IntEnum\n"
+                "\n"
+                "class codes(IntEnum):\n"
+                "    OK = 200\n"
+                "\n"
+                "    def label(self) -> str:\n"
+                "        return 'ok'\n"
+            ),
+            "main.py": "from codes import codes\nif __name__ == '__main__':\n    print(codes)\n",
+        },
+    )
+    found = {(finding.rule, finding.symbol) for finding in scan(tmp_path).findings}
+    assert ("UNUSED_VARIABLE", "OK") not in found
+    assert ("UNUSED_FUNCTION", "label") in found
+
+
+def test_noqa_f401_suppresses_the_unused_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "import encodings.idna  # noqa: F401\n"
+        "import socket  # noqa: F841\n"
+        "\n"
+        "def main():\n"
+        "    return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "encodings" not in unused
+    assert "socket" in unused
+
+
+def test_noqa_f401_with_a_trailing_note_suppresses_the_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "import encodings.idna  # noqa: F401 kept for plugins\n"
+        "import socket\n"
+        "\n"
+        "def main():\n"
+        "    return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "encodings" not in unused
+    assert "socket" in unused
+
+
+def test_standalone_noqa_does_not_hide_the_next_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "# noqa\n"
+        "import socket\n"
+        "\n"
+        "def main():\n"
+        "    return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "socket" in unused
+
+
+def test_parenthesized_noqa_covers_every_imported_name(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from json import (  # noqa: F401\n"
+        "    dumps,\n"
+        "    loads,\n"
+        ")\n"
+        "\n"
+        "def main():\n"
+        "    return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert unused.isdisjoint({"dumps", "loads"})
+
+
+def test_import_error_probe_scores_70(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def enable():\n"
+        "    try:\n"
+        "        import h2\n"
+        "    except ImportError:\n"
+        "        raise ImportError('missing')\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    enable()\n",
+        encoding="utf-8",
+    )
+    finding = next(item for item in scan(tmp_path).findings if item.rule == "UNUSED_IMPORT" and item.symbol == "h2")
+    assert finding.confidence == 70
+    assert finding.status == "POSSIBLY_DEAD"
+    assert "ImportError" in finding.evidence[-1]
+
+
+def test_pyopenssl_import_satisfies_the_dependency(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'app'\nversion = '0.1'\ndependencies = ['pyopenssl']\n",
+            "help.py": "import OpenSSL\nOpenSSL\n",
+            "main.py": "import help\nif __name__ == '__main__':\n    print(help)\n",
+        },
+    )
+    assert not any(
+        finding.rule == "UNUSED_DEPENDENCY" and finding.symbol == "pyopenssl"
+        for finding in scan(tmp_path).findings
+    )
+
+
+def test_dev_only_dependency_scores_70(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "requirements.txt": "runtime-missing\n",
+            "requirements-dev.txt": "ruff\n",
+            "docs/requirements.txt": "sphinx\n",
+            "pyproject.toml": (
+                "[dependency-groups]\n"
+                "dev = ['pytest']\n"
+            ),
+            "main.py": "if __name__ == '__main__':\n    print(1)\n",
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert findings["runtime-missing"].confidence == 95
+    assert findings["ruff"].confidence == 70
+    assert "development or docs" in findings["ruff"].evidence[0]
+    assert findings["sphinx"].confidence == 70
+    assert findings["pytest"].confidence == 70
+
+
+def test_cast_string_keeps_the_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, cast\n"
+        "if TYPE_CHECKING:\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        "def main(value):\n"
+        "    return cast('Fraction', value)\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main(1)\n",
+        encoding="utf-8",
+    )
+    assert "Fraction" not in {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    assert "Fraction" in path.read_text(encoding="utf-8")
+
+
+def test_constructor_call_reaches_the_method(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "class Widget:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "def main():\n"
+        "    return Widget().run()\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    assert "run" not in {finding.symbol for finding in scan(tmp_path).findings}
+
+
+def test_node_visitor_methods_are_reached(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "walk.py": (
+                "import ast\n"
+                "\n"
+                "class Walker(ast.NodeVisitor):\n"
+                "    def visit_Name(self, node):\n"
+                "        return helper(node)\n"
+                "\n"
+                "def helper(node):\n"
+                "    return node.id\n"
+                "\n"
+                "def main():\n"
+                "    Walker().visit(ast.parse('x'))\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+            "pages.py": (
+                "class Page:\n"
+                "    def visit_page(self):\n"
+                "        return 1\n"
+                "\n"
+                "def main():\n"
+                "    return Page()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    found = {(finding.rule, finding.symbol) for finding in scan(tmp_path).findings}
+    assert ("UNUSED_FUNCTION", "visit_Name") not in found
+    assert ("ORPHAN_FUNCTION", "helper") not in found
+    assert ("UNUSED_FUNCTION", "visit_page") in found
+
+
+def test_subdirectory_scan_ignores_manifests_outside_it(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'app'\nversion = '0.1'\ndependencies = ['pathspec']\n",
+            "src/app.py": "def main():\n    return 1\n",
+            "examples/requirements.txt": "requests\n",
+        },
+    )
+    findings = [item for item in scan(tmp_path / "src").findings if item.rule == "UNUSED_DEPENDENCY"]
+    assert {item.symbol for item in findings} == {"pathspec"}
+    assert all(not item.path.startswith("examples/") for item in findings)
+
+
+def test_literal_string_does_not_hide_an_unused_variable(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import Annotated, Literal\n"
+        "\n"
+        "fast = 1\n"
+        "mode = Literal['fast']\n"
+        "kind = Annotated[int, 'fast']\n"
+        "\n"
+        "def main():\n"
+        "    return mode, kind\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_VARIABLE"}
+    assert "fast" in unused
+
+
+def test_annotated_keeps_only_its_first_argument(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, Annotated\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        "Alias = Annotated['Decimal', 'Fraction']\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "Decimal" not in unused
+    assert "Fraction" in unused
+
+
+def test_dev_optional_extra_scores_70(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                "[project]\n"
+                "name = 'app'\n"
+                "version = '0.1'\n"
+                "\n"
+                "[project.optional-dependencies]\n"
+                "dev = ['ruff']\n"
+                "cli = ['click']\n"
+            ),
+            "main.py": "if __name__ == '__main__':\n    print(1)\n",
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert findings["ruff"].confidence == 70
+    assert "development or docs" in findings["ruff"].evidence[0]
+    assert findings["click"].confidence == 95

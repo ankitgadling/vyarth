@@ -60,6 +60,8 @@ The default entry patterns are:
 **/wsgi.py
 **/asgi.py
 **/manage.py
+setup.py
+**/docs/conf.py
 ```
 
 `[project.scripts]`, `[project.gui-scripts]`, and the `[project.entry-points]` groups `console_scripts` and `gui_scripts` in `pyproject.toml` are read automatically. `entry_points` adds more targets in the form `pkg.wsgi:app`. A value with no colon names a module.
