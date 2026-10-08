@@ -73,7 +73,7 @@ print(result.to_json())
 
 | Rule | Meaning | Confidence |
 | --- | --- | --- |
-| `UNUSED_IMPORT` | Import name never loaded | 100, or 70 when that file imports dynamically |
+| `UNUSED_IMPORT` | Import name never loaded | 100, or 70 when that file imports dynamically or the import is an `ImportError` probe |
 | `UNUSED_FUNCTION` | Function never loaded | 96 for a module-level function in a reached file, 96 for an unreferenced method on a used class, 75 when decorated but not an entry, 100 for a nested one |
 | `UNUSED_CLASS` | Class never loaded, including as a base class | 96 at module level in a reached file, 75 when decorated but not an entry, 100 when nested |
 | `UNUSED_VARIABLE` | Module or function variable never read | 100 in a reached file, or 70 for a module-level name in a dynamic file |
@@ -94,7 +94,7 @@ Unused modules are not called dead. They stay at 82% unless the project calls `i
 
 A project that contains a `src/` directory accepts both import styles. `src/account/cache.py` is `account.cache` for a src-layout install (`import account.cache`) and `src.account.cache` when the project root is on the path (`from src.account.cache import invalidate_account_cache`). Either import reaches that file. A function in the file is unused only when no reached module calls it.
 
-`upgrade`, `downgrade`, `revision`, `down_revision`, `branch_labels`, and `depends_on` under `alembic/versions/` score 70%. The finding stays. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` score 70% when the import name (`psycopg2`, `jwt`, `dotenv`, `jose`) is used. A runtime package that is neither declared under that import name nor imported stays at 95%. A package declared only as a development or docs dependency stays at 70%.
+`upgrade`, `downgrade`, `revision`, `down_revision`, `branch_labels`, and `depends_on` under `alembic/versions/` score 70%. The finding stays. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` score 70% when the import name (`psycopg2`, `jwt`, `dotenv`, `jose`) is used. A runtime package that is neither declared under that import name nor imported stays at 95%. A package declared only as a development or docs dependency stays at 70%, including an optional extra named `dev`, `test`, `tests`, `docs`, or `lint`.
 
 Entry modules are files matching the entry patterns, files with `if __name__ == "__main__":`, `[project.scripts]` and `[project.gui-scripts]` targets, `entry_points` from config, and test modules. The default entry patterns are `**/__main__.py`, `**/wsgi.py`, `**/asgi.py`, `**/manage.py`, `setup.py`, and `**/docs/conf.py`. A symbol is also an entry when it is decorated with a framework hook (`route`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `task`, `shared_task`, `command`, `group`, `fixture`), named `lambda_handler` or `test_*`, or a method named `ready`. `@property`, `@staticmethod`, and `@classmethod` are recorded and are not entries by themselves. Extra decorator names go in `framework_decorators`.
 
@@ -170,7 +170,7 @@ An unreferenced method on a used class is `UNUSED_FUNCTION` at 96. `@property`, 
 
 A name listed in `__all__` is used, and so is `from module import Name as Name`. So is a name that another project module imports and then loads: a call, an annotation, or another `__all__` entry. An import that nothing in the importing file loads does not keep the original definition alive. Passing a function as a value (`handlers.append(foo)`) is a use, so that function is not an orphan.
 
-Dependency names are read from `requirements.txt`, `requirements-dev.txt`, `pyproject.toml` (project dependencies, optional dependencies, Poetry, and uv), `Pipfile`, and a literal `install_requires` list in `setup.py`. Install-name matches are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, and `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose`. A package declared only as a development or docs dependency stays at 70%. A runtime package with no matching import stays at 95%.
+Dependency names are read from `requirements.txt`, `requirements-dev.txt`, `pyproject.toml` (project dependencies, optional dependencies, Poetry, and uv), `Pipfile`, and a literal `install_requires` list in `setup.py`. Install-name matches are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, and `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose`. A package declared only as a development or docs dependency stays at 70%, including a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, or `lint`. Other optional extras stay at 95% when nothing imports them. A runtime package with no matching import stays at 95%.
 
 `assert` is not treated as an exit. Aliases (`alias = func` then `alias()`), `pkg.api.func()`, stores such as `self.handler = func`, and `make().run()` when `make` is annotated `-> Widget` are followed. An unresolved `obj.method()` still does not connect every method of that name.
 

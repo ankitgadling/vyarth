@@ -17,8 +17,9 @@ _IGNORE_RE = re.compile(
     r"vyarth\s*:\s*ignore(?:\s*\[\s*([^\]]*?)\s*\])?",
     re.IGNORECASE,
 )
+_NOQA_CODE = r"[A-Za-z]+[0-9]+"
 _NOQA_RE = re.compile(
-    r"noqa\b(?:\s*:\s*([A-Za-z0-9_,\s]+))?",
+    rf"noqa\b(?:\s*:\s*({_NOQA_CODE}(?:\s*,\s*{_NOQA_CODE})*))?",
     re.IGNORECASE,
 )
 
@@ -56,24 +57,20 @@ def collect_ignores(source: str) -> tuple[IgnoreDirective, ...]:
 def import_noqa_ignores(tree: ast.AST, source: str) -> tuple[IgnoreDirective, ...]:
     """`# noqa` and `# noqa: F401` suppress unused imports on that statement.
 
-    The comment may sit on the import line, on any line of a parenthesized
-    import, or on the line immediately above the statement.
+    The comment may sit on any line of the import, including a parenthesized
+    import. A `# noqa` on the previous line does not apply. Words after the
+    code, as in `# noqa: F401 kept for plugins`, are not part of the code.
     """
     lines = _noqa_import_lines(source)
     if not lines:
         return ()
-    spans = [
-        (node.lineno, node.end_lineno or node.lineno)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import | ast.ImportFrom)
-    ]
     extra: list[IgnoreDirective] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Import | ast.ImportFrom):
             continue
         start = node.lineno
         end = node.end_lineno or start
-        if not _noqa_covers_import(start, end, lines, spans):
+        if not any(start <= line <= end for line in lines):
             continue
         for alias in node.names:
             if alias.name == "*":
@@ -81,17 +78,6 @@ def import_noqa_ignores(tree: ast.AST, source: str) -> tuple[IgnoreDirective, ..
             line = alias.lineno if isinstance(alias.lineno, int) else start
             extra.append(IgnoreDirective(line=line, rules=("unused_import",), exact=True))
     return tuple(extra)
-
-
-def _noqa_covers_import(start: int, end: int, lines: set[int], spans: list[tuple[int, int]]) -> bool:
-    for line in lines:
-        if start <= line <= end:
-            return True
-        # A noqa on the previous line belongs to this import only when that
-        # line is not already inside another import statement.
-        if line == start - 1 and not any(span_start <= line <= span_end for span_start, span_end in spans):
-            return True
-    return False
 
 
 def _noqa_import_lines(source: str) -> set[int]:

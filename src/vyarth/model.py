@@ -8,7 +8,7 @@ from typing import Any
 
 # Bump when FileIndex gains fields or the indexer changes meaning.
 # The scan cache mixes this into its stamp so old records are not reused.
-INDEX_VERSION = 9
+INDEX_VERSION = 10
 
 
 def make_fingerprint(rule: str, path: str, qualname: str) -> str:
@@ -191,6 +191,7 @@ class FileIndex:
     unbound_names: tuple[str, ...] = ()
     dynamic_imports: tuple[str, ...] = ()
     container_stores: tuple[ContainerStore, ...] = ()
+    import_probes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

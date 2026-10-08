@@ -32,6 +32,7 @@ _DYNAMIC_MESSAGE = "Dynamic usage detected. Static analysis cannot prove this sy
 _DECORATED_NOTE = "Decorated, but not a recognized framework entry."
 _MODULE_CAP_NOTE = "This file has no incoming imports, so this score follows the module."
 _ALEMBIC_NOTE = "Alembic loads this name when the migration runs."
+_PROBE_NOTE = "This import sits in a try that catches ImportError, so it may be an availability check."
 _CAPPED_RULES = {
     "UNUSED_FUNCTION",
     "UNUSED_CLASS",
@@ -78,6 +79,13 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
             return replace(finding, confidence=60, status="POSSIBLY_UNUSED_MODULE")
         return finding
     if finding.rule == "UNUSED_IMPORT":
+        if index is not None and finding.symbol in index.import_probes:
+            return replace(
+                finding,
+                confidence=70,
+                status="POSSIBLY_DEAD",
+                evidence=_with_note(finding.evidence, _PROBE_NOTE),
+            )
         if index is not None and _import_dynamic(index):
             return replace(finding, confidence=70, status="POSSIBLY_DEAD")
         return finding

@@ -103,6 +103,7 @@ class _Indexer(ast.NodeVisitor):
         self._counter = 0
         self._annotation_depth = 0
         self._import_probe = 0
+        self.import_probes: list[str] = []
 
     def index(self) -> FileIndex:
         tree = ast.parse(self.source, filename=self.path)
@@ -139,6 +140,7 @@ class _Indexer(ast.NodeVisitor):
             unbound_names=tuple(sorted(self.unbound)),
             dynamic_imports=tuple(dict.fromkeys(self.dynamic_imports)),
             container_stores=tuple(self._container_stores()),
+            import_probes=tuple(dict.fromkeys(self.import_probes)),
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -263,9 +265,9 @@ class _Indexer(ast.NodeVisitor):
         )
 
     def _probe_import(self, binding: _Binding) -> None:
-        """An import inside `try/except ImportError` is used for its side effect."""
+        """Remember an import inside `try/except ImportError` for a lower score."""
         if self._import_probe:
-            binding.read_count += 1
+            self.import_probes.append(binding.name)
 
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_try(node)
@@ -440,12 +442,30 @@ class _Indexer(ast.NodeVisitor):
             self._bind(node.id, "variable", node.lineno, node.col_offset)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
+        if _is_annotated(node.value):
+            self.visit(node.value)
+            self._visit_annotated_slice(node.slice)
+            return
         if self._annotation_depth == 0 and _is_typing_form(node.value):
             self.visit(node.value)
             self._visit_annotation(node.slice)
             return
         self.visit(node.value)
         self.visit(node.slice)
+
+    def _visit_annotated_slice(self, node: ast.expr) -> None:
+        """Only the first argument of `Annotated` is a type. The rest is metadata."""
+        elements = node.elts if isinstance(node, ast.Tuple) else (node,)
+        if not elements:
+            return
+        self._visit_annotation(elements[0])
+        depth = self._annotation_depth
+        self._annotation_depth = 0
+        try:
+            for extra in elements[1:]:
+                self.visit(extra)
+        finally:
+            self._annotation_depth = depth
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
         if isinstance(node.op, ast.BitOr):
@@ -1077,16 +1097,24 @@ class _Indexer(ast.NodeVisitor):
                 self._note_attribute_call(expr, caller, line)
 
 
-_TYPING_FORMS = {"Union", "Optional", "Annotated", "Literal"}
+_TYPING_FORMS = {"Union", "Optional", "Annotated"}
 _IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError"}
 
 
-def _is_typing_form(node: ast.expr) -> bool:
+def _form_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Name):
-        return node.id in _TYPING_FORMS
+        return node.id
     if isinstance(node, ast.Attribute):
-        return node.attr in _TYPING_FORMS
-    return False
+        return node.attr
+    return None
+
+
+def _is_typing_form(node: ast.expr) -> bool:
+    return _form_name(node) in _TYPING_FORMS
+
+
+def _is_annotated(node: ast.expr) -> bool:
+    return _form_name(node) == "Annotated"
 
 
 def _catches_import_error(handlers: list[ast.ExceptHandler]) -> bool:

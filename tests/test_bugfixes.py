@@ -848,11 +848,10 @@ def test_noqa_f401_suppresses_the_unused_import(tmp_path):
     assert "socket" in unused
 
 
-def test_noqa_on_the_line_above_suppresses_only_that_import(tmp_path):
+def test_noqa_f401_with_a_trailing_note_suppresses_the_import(tmp_path):
     path = tmp_path / "app.py"
     path.write_text(
-        "# noqa: F401\n"
-        "import encodings.idna\n"
+        "import encodings.idna  # noqa: F401 kept for plugins\n"
         "import socket\n"
         "\n"
         "def main():\n"
@@ -864,6 +863,23 @@ def test_noqa_on_the_line_above_suppresses_only_that_import(tmp_path):
     )
     unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
     assert "encodings" not in unused
+    assert "socket" in unused
+
+
+def test_standalone_noqa_does_not_hide_the_next_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "# noqa\n"
+        "import socket\n"
+        "\n"
+        "def main():\n"
+        "    return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
     assert "socket" in unused
 
 
@@ -886,7 +902,7 @@ def test_parenthesized_noqa_covers_every_imported_name(tmp_path):
     assert unused.isdisjoint({"dumps", "loads"})
 
 
-def test_import_error_probe_counts_as_a_use(tmp_path):
+def test_import_error_probe_scores_70(tmp_path):
     path = tmp_path / "app.py"
     path.write_text(
         "def enable():\n"
@@ -899,7 +915,10 @@ def test_import_error_probe_counts_as_a_use(tmp_path):
         "    enable()\n",
         encoding="utf-8",
     )
-    assert "h2" not in {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    finding = next(item for item in scan(tmp_path).findings if item.rule == "UNUSED_IMPORT" and item.symbol == "h2")
+    assert finding.confidence == 70
+    assert finding.status == "POSSIBLY_DEAD"
+    assert "ImportError" in finding.evidence[-1]
 
 
 def test_pyopenssl_import_satisfies_the_dependency(tmp_path):
@@ -937,3 +956,61 @@ def test_dev_only_dependency_scores_70(tmp_path):
     assert "development or docs" in findings["ruff"].evidence[0]
     assert findings["sphinx"].confidence == 70
     assert findings["pytest"].confidence == 70
+
+
+def test_literal_string_does_not_hide_an_unused_variable(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import Annotated, Literal\n"
+        "\n"
+        "fast = 1\n"
+        "mode = Literal['fast']\n"
+        "kind = Annotated[int, 'fast']\n"
+        "\n"
+        "def main():\n"
+        "    return mode, kind\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_VARIABLE"}
+    assert "fast" in unused
+
+
+def test_annotated_keeps_only_its_first_argument(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, Annotated\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        "Alias = Annotated['Decimal', 'Fraction']\n",
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(tmp_path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "Decimal" not in unused
+    assert "Fraction" in unused
+
+
+def test_dev_optional_extra_scores_70(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                "[project]\n"
+                "name = 'app'\n"
+                "version = '0.1'\n"
+                "\n"
+                "[project.optional-dependencies]\n"
+                "dev = ['ruff']\n"
+                "cli = ['click']\n"
+            ),
+            "main.py": "if __name__ == '__main__':\n    print(1)\n",
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert findings["ruff"].confidence == 70
+    assert "development or docs" in findings["ruff"].evidence[0]
+    assert findings["click"].confidence == 95

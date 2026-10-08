@@ -6,7 +6,7 @@ Each finding has a rule, a status, a confidence from 0 to 100, a message, eviden
 
 | Rule | Meaning | Confidence | Status |
 | --- | --- | --- | --- |
-| `UNUSED_IMPORT` | Import name never loaded | 100, or 70 when that file imports dynamically | `DEAD`, or `POSSIBLY_DEAD` at 70 |
+| `UNUSED_IMPORT` | Import name never loaded | 100, or 70 when that file imports dynamically or the import is an `ImportError` probe | `DEAD`, or `POSSIBLY_DEAD` at 70 |
 | `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 96 at module level or on a used class, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 96 at module level, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_VARIABLE` | Module, class, or function variable never read | 100 in a function or at module level, 96 for an unreferenced attribute on a used class, 70 or 60 when a dynamic or unresolved call uses the name | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
@@ -25,7 +25,7 @@ A load is a read: a call, a decorator, passing the name as a value, or using it 
 
 The name `_` and dunder names such as `__all__` are not reported. Parameters are indexed and not reported.
 
-`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, `Annotated`, `Literal`, or a `|` expression does too.
+`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, the first argument of `Annotated`, or a `|` expression does too. A string inside `Literal`, or later `Annotated` metadata, does not.
 
 A name listed in `__all__` is used. So is a name that another project module imports and then loads: a call, an annotation, or another `__all__` entry. An import that nothing in the importing file loads does not keep the original definition alive. Passing a function as a value (`handlers.append(foo)`) is a use.
 
@@ -57,7 +57,7 @@ A plain class attribute that nothing loads, on a class that is used, is `UNUSED_
 
 ## `UNUSED_IMPORT`
 
-The imported name is unused when nothing in that file loads it and it is not re-exported through `__all__` or `from module import Name as Name`. Confidence stays at 100 unless the same file calls `importlib`, `importlib.import_module`, or `__import__`, which lowers every unused import in that file to 70%. An import that is the body of a `try` whose handler catches `ImportError` or `ModuleNotFoundError` is used: the import itself is the check. `# noqa` and `# noqa: F401` on the import, or on the line above it, suppress `UNUSED_IMPORT` for the names in that statement.
+The imported name is unused when nothing in that file loads it and it is not re-exported through `__all__` or `from module import Name as Name`. Confidence stays at 100 unless the same file calls `importlib`, `importlib.import_module`, or `__import__`, which lowers every unused import in that file to 70%. An import that is the body of a `try` whose handler catches `ImportError` or `ModuleNotFoundError` stays reported at 70%, because the import may be an availability check and may also be unused. `# noqa` and `# noqa: F401` on the import statement, including a parenthesized import and a note after the code such as `# noqa: F401 kept for plugins`, suppress `UNUSED_IMPORT` for the names in that statement. A `# noqa` on the previous line does not.
 
 ## `UNREACHABLE_CODE`
 
@@ -92,7 +92,7 @@ Dependency names are read from:
 
 The package `python` is skipped. Requirement lines that are comments, `-r`, `-c`, `-e`, `--`, `git+`, or URLs are skipped.
 
-These install names match their import names and are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, `beautifulsoup4` / `bs4`, `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose`. A package declared only in a development or docs manifest (`requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, or Pipfile `dev-packages`) stays reported at 70%. A runtime package with no matching import stays at 95%, with the message `No Python imports found.`
+These install names match their import names and are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, `beautifulsoup4` / `bs4`, `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose`. A package declared only in a development or docs manifest (`requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, or a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`) stays reported at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package with no matching import stays at 95%, with the message `No Python imports found.`
 
 Scanning a single file skips this rule. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
 
@@ -116,6 +116,6 @@ A comment with no bracket suppresses every rule on that statement. A bracket lis
 
 A comment on the line above a decorator, or on a decorator line, also covers the `def` or `class` it belongs to.
 
-`# noqa` and `# noqa: F401` suppress `UNUSED_IMPORT` for every name in that import statement. A `# noqa` that lists other codes, and not `F401`, does not.
+`# noqa` and `# noqa: F401` on an import statement suppress `UNUSED_IMPORT` for every name in that statement. Words after the code, as in `# noqa: F401 kept for plugins`, are ignored. A `# noqa` that lists other codes, and not `F401`, does not. A `# noqa` on the line above the import does not either.
 
 Path suppression is separate: `ignore` in config drops findings without a comment. See [Configuration](configuration.md).

@@ -14,6 +14,7 @@ from vyarth.model import FileIndex, Finding, ParseError, make_fingerprint
 _NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
 _MESSAGE = "No Python imports found."
 _DEV_EVIDENCE = "Declared in {path} as a development or docs dependency and never imported."
+_DEV_EXTRAS = {"dev", "test", "tests", "docs", "doc", "lint"}
 _CANONICAL = {
     "pil": "pillow",
     "pillow": "pillow",
@@ -122,7 +123,7 @@ def _canonical(name: str) -> str:
 
 
 def _declared(root: Path) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
-    found: list[tuple[Path, list[tuple[str, int]], ParseError | None]] = []
+    found: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
     root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS and not name.endswith(".egg-info")]
@@ -170,6 +171,12 @@ def _docs_requirements(path: Path, root: Path) -> bool:
     return relative.name == "requirements.txt" and "docs" in relative.parts
 
 
+def _dev_extra(name: str) -> bool:
+    """True for optional-dependency groups that install tools, not runtime packages."""
+    normalized = str(name).strip().lower().replace("_", "-")
+    return normalized in _DEV_EXTRAS or normalized.endswith("-dev")
+
+
 def _tag(packages: list[tuple[str, int]], dev: bool) -> list[tuple[str, int, bool]]:
     return [(name, line, dev) for name, line in packages]
 
@@ -184,8 +191,8 @@ def _pyproject(path: Path) -> list[tuple[str, int, bool]]:
         packages.extend(_tag(_requirement_list(project.get("dependencies"), lines), False))
         optional = project.get("optional-dependencies", {})
         if isinstance(optional, dict):
-            for group in optional.values():
-                packages.extend(_tag(_requirement_list(group, lines), False))
+            for group_name, group in optional.items():
+                packages.extend(_tag(_requirement_list(group, lines), _dev_extra(group_name)))
     poetry = data.get("tool", {})
     if isinstance(poetry, dict):
         poetry_table = poetry.get("poetry", {})
