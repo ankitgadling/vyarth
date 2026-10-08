@@ -14,13 +14,13 @@ These findings are rewritten when confidence is 100:
 | Finding | Edit |
 | --- | --- |
 | `UNUSED_IMPORT` with status `DEAD` | Drop that imported name. An import statement with no names left is deleted. |
-| `UNREACHABLE_CODE` | Delete the statement. If that empties a `if`, `for`, `while`, `try`, `with`, or `match` body, the body becomes `pass`. |
+| `UNREACHABLE_CODE` | Delete the statement. If that empties a `if`, `for`, `while`, `try`, `with`, or `match` body, the body becomes `pass`. A `yield` or `yield from` that is the only yield in its function is left in place. |
 | `UNUSED_FUNCTION` whose qualname is nested | Delete the nested function, including its decorators. |
 | `UNUSED_VARIABLE` whose qualname is nested | Delete the assignment when every name on that line is an unused local and the value is not a call. |
 
 Module-level functions, classes, methods, and module-level assignments stay reported. A line that mixes an import with another statement is left alone, and so is a wildcard import. A trailing comment on an import line is kept when the statement remains.
 
-`vyarth.fix.rewrite_source(source, findings, relpath)` applies the same edits to a string and returns `(new_source, notes)`. `apply_fixes(root, findings)` writes the files. `is_fixable(finding)` reports whether a finding is a candidate before the syntax checks that can still skip it.
+`vyarth.fix.rewrite_source(source, findings, relpath)` applies the same edits to a string and returns `(new_source, notes)`. `apply_fixes(root, findings)` writes the files. `is_fixable(finding, source=None)` reports whether a finding is a candidate before the syntax checks that can still skip it. Pass the file text so the sole-yield guard can refuse an unreachable generator yield.
 
 ## Language server
 

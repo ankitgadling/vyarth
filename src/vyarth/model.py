@@ -8,7 +8,7 @@ from typing import Any
 
 # Bump when FileIndex gains fields or the indexer changes meaning.
 # The scan cache mixes this into its stamp so old records are not reused.
-INDEX_VERSION = 8
+INDEX_VERSION = 9
 
 
 def make_fingerprint(rule: str, path: str, qualname: str) -> str:
@@ -155,10 +155,15 @@ class BodyHash:
 
 @dataclass(frozen=True)
 class IgnoreDirective:
-    """A `# vyarth: ignore` comment. `rules` is None when every rule is suppressed."""
+    """A `# vyarth: ignore` comment. `rules` is None when every rule is suppressed.
+
+    `exact` is set for `# noqa` directives, which cover only the import line they
+    name. A directive on the previous line must not hide the next import.
+    """
 
     line: int
     rules: tuple[str, ...] | None
+    exact: bool = False
 
 
 @dataclass(frozen=True)

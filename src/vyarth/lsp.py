@@ -69,7 +69,7 @@ def code_actions_for(uri: str, lsp_range: dict | None = None) -> list[dict]:
     _, relpath, source, result = scanned
     actions: list[dict] = []
     for finding in result.findings:
-        if finding.path != relpath or not is_fixable(finding):
+        if finding.path != relpath or not is_fixable(finding, source):
             continue
         if lsp_range is not None and not _covers(finding.line, lsp_range):
             continue

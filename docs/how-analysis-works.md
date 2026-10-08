@@ -24,7 +24,7 @@ A syntax error becomes a `ParseError`. That file is skipped and the scan continu
 
 A module is an entry when any of these is true:
 
-- its path matches an entry pattern (`**/__main__.py`, `**/wsgi.py`, `**/asgi.py`, `**/manage.py`, unless you replace the list)
+- its path matches an entry pattern (`**/__main__.py`, `**/wsgi.py`, `**/asgi.py`, `**/manage.py`, `setup.py`, `**/docs/conf.py`, unless you replace the list)
 - it contains `if __name__ == "__main__":`
 - it is a test module
 - `[project.scripts]`, `[project.gui-scripts]`, or an entry-points group named `console_scripts` or `gui_scripts` names it
@@ -48,12 +48,12 @@ A module that no entry can import is `POSSIBLY_UNUSED_MODULE`. Modules that impo
 Inside a reached module, a symbol is alive when any of these is true:
 
 - something in its scope loads the name
-- the module lists it in `__all__`
+- the module lists it in `__all__`, or re-exports it with `from module import Name as Name`
 - a reached caller calls it, decorates with it, or passes it as a value
 - an entry decorator or an entry name marks it
 - another module imports it and then loads that import
 
-Aliases are followed. `alias = func` and then `alias()` reaches `func`. `pkg.api.func()` reaches `func` when `pkg.api` resolves to a project module. `self.handler = func` and a later `self.handler()` reach `func`. `make().run()` reaches `Widget.run` when `make` is annotated `-> Widget`.
+Aliases are followed. `alias = func` and then `alias()` reaches `func`. `pkg.api.func()` reaches `func` when `pkg.api` resolves to a project module. `types.Name` reaches `Name` when `types` is a project submodule. `self.handler = func` and a later `self.handler()` reach `func`. `make().run()` reaches `Widget.run` when `make` is annotated `-> Widget`. A call on a parameter annotated as a class reaches that method. The body of a `@property` or `@cached_property` on a used class is walked. A reached method call also reaches an override of that method on a known subclass.
 
 A list or tuple of functions records those functions in order. A later constant subscript calls that element. A loop, or an unknown index, calls every element. A store with no later call still counts as a use, and the stored function’s body is still walked.
 

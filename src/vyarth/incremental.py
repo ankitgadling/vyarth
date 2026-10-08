@@ -112,7 +112,11 @@ def _index_from_dict(data: dict) -> FileIndex:
 
 def _ignore(item: dict) -> IgnoreDirective:
     rules = item.get("rules")
-    return IgnoreDirective(line=item["line"], rules=None if rules is None else tuple(rules))
+    return IgnoreDirective(
+        line=item["line"],
+        rules=None if rules is None else tuple(rules),
+        exact=bool(item.get("exact", False)),
+    )
 
 
 def _container(item: dict) -> ContainerStore:

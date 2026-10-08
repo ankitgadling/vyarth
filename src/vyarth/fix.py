@@ -25,14 +25,19 @@ def apply_import_fixes(root: Path, findings: list[Finding] | tuple[Finding, ...]
     return _write(root, chosen)
 
 
-def is_fixable(finding: Finding) -> bool:
-    """True when a rewrite may delete this finding."""
+def is_fixable(finding: Finding, source: str | None = None) -> bool:
+    """True when a rewrite may delete this finding.
+
+    Pass `source` so an unreachable `yield` that is the only yield in its
+    function is left in place. Deleting it would turn a generator into a
+    normal function.
+    """
     if finding.rule == "UNUSED_IMPORT" and finding.status == "DEAD":
         return True
     if finding.confidence < 100:
         return False
     if finding.rule == "UNREACHABLE_CODE":
-        return True
+        return source is None or not _sole_yield(source, finding.line)
     return finding.rule in {"UNUSED_FUNCTION", "UNUSED_VARIABLE"} and _nested_name(finding)
 
 
@@ -217,7 +222,7 @@ def _statement_edits(
         if finding.confidence < 100:
             continue
         edit: tuple[int, int, str, tuple[str, ...]] | None = None
-        if finding.rule == "UNREACHABLE_CODE":
+        if finding.rule == "UNREACHABLE_CODE" and not _sole_yield(source, finding.line):
             edit = _unreachable_edit(tree, parents, source, finding, relpath, dead_lines)
         elif finding.rule == "UNUSED_FUNCTION" and _nested_name(finding):
             edit = _function_edit(tree, parents, source, finding, relpath)
@@ -226,6 +231,29 @@ def _statement_edits(
         if edit is not None:
             edits.append(edit)
     return edits
+
+
+def _sole_yield(source: str, line: int) -> bool:
+    """True when `line` holds the only yield in its function."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    parents = _parents(tree)
+    match = _statement_at(tree, line)
+    if match is None or not _contains_yield(match):
+        return False
+    function: ast.AST | None = match
+    while function is not None and not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        function = parents.get(function)
+    if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        return False
+    yields = [node for node in ast.walk(function) if isinstance(node, ast.Yield | ast.YieldFrom)]
+    return len(yields) == 1
+
+
+def _contains_yield(node: ast.AST) -> bool:
+    return any(isinstance(child, ast.Yield | ast.YieldFrom) for child in ast.walk(node))
 
 
 def _unreachable_edit(

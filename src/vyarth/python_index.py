@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 
-from vyarth.ignore import collect_ignores, expand_decorator_ignores
+from vyarth.ignore import collect_ignores, expand_decorator_ignores, import_noqa_ignores
 from vyarth.model import (
     BodyHash,
     CallEdge,
@@ -102,6 +102,7 @@ class _Indexer(ast.NodeVisitor):
         self.duplicate_min = duplicate_min_statements
         self._counter = 0
         self._annotation_depth = 0
+        self._import_probe = 0
 
     def index(self) -> FileIndex:
         tree = ast.parse(self.source, filename=self.path)
@@ -115,6 +116,7 @@ class _Indexer(ast.NodeVisitor):
         finally:
             _FOLD.reset(token)
         ignores = expand_decorator_ignores(tree, collect_ignores(self.source))
+        ignores = ignores + import_noqa_ignores(tree, self.source)
         return FileIndex(
             path=self.path,
             bindings=tuple(_freeze_bindings(self.module)),
@@ -202,7 +204,8 @@ class _Indexer(ast.NodeVisitor):
         for alias in node.names:
             local = alias.asname or alias.name.split(".")[0]
             line, column = _alias_position(alias, node)
-            self._bind(local, "import", line, column)
+            binding = self._bind(local, "import", line, column)
+            self._probe_import(binding)
             self.imports.append(
                 ImportEdge(
                     line=line,
@@ -235,6 +238,10 @@ class _Indexer(ast.NodeVisitor):
             binding = self._bind(local, "import", line, column)
             if node.module == "__future__":
                 binding.read_count += 1
+            elif self._explicit_reexport(alias):
+                binding.read_count += 1
+                self.exports.add(local)
+            self._probe_import(binding)
             self.imports.append(
                 ImportEdge(
                     line=line,
@@ -246,6 +253,40 @@ class _Indexer(ast.NodeVisitor):
                     is_wildcard=False,
                 )
             )
+
+    def _explicit_reexport(self, alias: ast.alias) -> bool:
+        """PEP 484 marks `from module import Name as Name` as a public re-export."""
+        return (
+            self.scope.kind == "module"
+            and alias.asname is not None
+            and alias.asname == alias.name
+        )
+
+    def _probe_import(self, binding: _Binding) -> None:
+        """An import inside `try/except ImportError` is used for its side effect."""
+        if self._import_probe:
+            binding.read_count += 1
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        probe = _catches_import_error(node.handlers)
+        if probe:
+            self._import_probe += 1
+        for statement in node.body:
+            self.visit(statement)
+        if probe:
+            self._import_probe -= 1
+        for handler in node.handlers:
+            self.visit(handler)
+        for statement in node.orelse:
+            self.visit(statement)
+        for statement in node.finalbody:
+            self.visit(statement)
 
     def visit_Global(self, node: ast.Global) -> None:
         self.scope.global_names.update(node.names)
@@ -397,6 +438,28 @@ class _Indexer(ast.NodeVisitor):
             self._add_load(node.id, node.lineno, node.col_offset, value=True)
         elif isinstance(node.ctx, ast.Store):
             self._bind(node.id, "variable", node.lineno, node.col_offset)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if self._annotation_depth == 0 and _is_typing_form(node.value):
+            self.visit(node.value)
+            self._visit_annotation(node.slice)
+            return
+        self.visit(node.value)
+        self.visit(node.slice)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if isinstance(node.op, ast.BitOr):
+            self._visit_union_operand(node.left)
+            self._visit_union_operand(node.right)
+            return
+        self.visit(node.left)
+        self.visit(node.right)
+
+    def _visit_union_operand(self, node: ast.expr) -> None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            self._visit_annotation(node)
+            return
+        self.visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if self._annotation_depth <= 0 or not isinstance(node.value, str):
@@ -1012,6 +1075,35 @@ class _Indexer(ast.NodeVisitor):
                 self._push_raw(_RawCall(caller, self.scope, line, "name", expr.id, "", True, getattr(expr, "col_offset", 0)))
             elif isinstance(expr, ast.Attribute):
                 self._note_attribute_call(expr, caller, line)
+
+
+_TYPING_FORMS = {"Union", "Optional", "Annotated", "Literal"}
+_IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError"}
+
+
+def _is_typing_form(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in _TYPING_FORMS
+    if isinstance(node, ast.Attribute):
+        return node.attr in _TYPING_FORMS
+    return False
+
+
+def _catches_import_error(handlers: list[ast.ExceptHandler]) -> bool:
+    return any(_exception_names(handler.type) & _IMPORT_ERRORS for handler in handlers if handler.type is not None)
+
+
+def _exception_names(node: ast.expr) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, ast.Tuple):
+        found: set[str] = set()
+        for element in node.elts:
+            found.update(_exception_names(element))
+        return found
+    return set()
 
 
 class PythonAstBackend:
