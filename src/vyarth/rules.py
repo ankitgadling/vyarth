@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from vyarth.config import Config
@@ -46,10 +47,11 @@ def collect_findings(
     *,
     check_modules: bool,
     progress: ScanProgress | None = None,
+    extra_roots: Iterable[Path] = (),
 ) -> list[Finding]:
     findings: list[Finding] = []
     _status(progress, "tracing which code runs")
-    project = build_project(indexes, root)
+    project = build_project(indexes, root, extra_roots)
     project = rebind(project, apply_flow(project))
     entries = collect_entries(project, config)
     reached, unresolved = reachable_symbols(project, entries)

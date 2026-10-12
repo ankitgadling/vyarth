@@ -19,9 +19,11 @@ These findings are rewritten when confidence is 100, except an unused import, wh
 | Finding | Edit |
 | --- | --- |
 | `UNUSED_IMPORT` with status `DEAD` | Drop that imported name. An import statement with no names left is deleted. An unused import in `__init__.py`, and a dotted `import pkg.sub`, stay in place unless `--unsafe` is set. |
-| `UNREACHABLE_CODE` | Delete the statement. If that empties a `if`, `for`, `while`, `try`, `with`, or `match` body, the body becomes `pass`. A `yield` or `yield from` that is the only yield in its function is left in place. |
+| `UNREACHABLE_CODE` | Delete the statement. A `yield` or `yield from` that is the only yield in its function is left in place. |
 | `UNUSED_FUNCTION` whose qualname is nested | Delete the nested function, including its decorators. |
-| `UNUSED_VARIABLE` whose qualname is nested | Delete the assignment when every name on that line is an unused local and the value is not a call. |
+| `UNUSED_VARIABLE` whose qualname is nested | Delete the assignment when every name on that line is an unused local and the value is only constants, names, or containers of those. A call, `await`, `yield`, subscript, attribute, or walrus stays. |
+
+If a deletion would empty a `def`, `class`, `if`, `for`, `while`, `try`, `with`, `except`, or `match` body, that body becomes `pass`. The rewrite is skipped when the result would not parse. Line endings, the coding cookie, and a UTF-8 BOM are preserved.
 
 Module-level functions, classes, methods, and module-level assignments stay reported. A line that mixes an import with another statement is left alone, and so is a wildcard import. A trailing comment on an import line is kept when the statement remains.
 
@@ -52,12 +54,13 @@ It answers:
 | `textDocument/didOpen` | Remembers `textDocument.text` and publishes diagnostics for that URI. |
 | `textDocument/didChange` | Replaces the remembered buffer with the latest full text from `contentChanges` and publishes diagnostics. |
 | `textDocument/didSave` | Drops the buffer, reads the file from disk, and publishes diagnostics. |
+| `textDocument/didClose` | Drops the buffer. |
 | `textDocument/diagnostic` | Returns diagnostics for that file from a project scan. |
 | `textDocument/codeAction` | Returns a quick fix for each fixable finding in the requested range. |
 | `textDocument/publishDiagnostics` | Sent after open, change, and save. The client does not request it. |
 
 Diagnostics use severity 1 (error) at confidence 90 or above and severity 2 (warning) below that. `source` is `vyarth` and `code` is the rule id.
 
-The project root is the nearest parent of the file that contains `pyproject.toml`, `vyarth.toml`, or `.git`. A scan is reused while the project root, the open buffer text, and the size and modification time of the indexed files stay the same. An unchanged unsaved buffer does not scan again. The file list is restatted instead of walking the tree on every request. A request that fails returns a JSON-RPC error (`-32700` for invalid JSON, `-32603` for an internal error) when the message has an id, and the server keeps reading. A failed notification is logged on standard error and does not stop the process. Code actions call the same rewrites as `vyarth fix` and return a workspace edit for the changed span.
+The project root is the nearest parent of the file that contains `pyproject.toml`, `vyarth.toml`, or `.git`. A scan is reused while the project root, the open buffer text, and the size and modification time of the indexed files stay the same. An unchanged unsaved buffer does not scan again. The file list is restatted instead of walking the tree on every request. Diagnostic columns are UTF-16 code units. A request that fails returns a JSON-RPC error (`-32700` for invalid JSON, `-32601` for an unknown method, `-32603` for an internal error) when the message has an id, and the server keeps reading. A missing `Content-Length` is an invalid request, not the end of the stream. A failed notification is logged on standard error and does not stop the process. Code actions call the same rewrites as `vyarth fix` and return a workspace edit for the changed span.
 
 There is no published editor extension yet. Any client that can launch a stdio language server can use `vyarth lsp` directly.

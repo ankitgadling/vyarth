@@ -9,6 +9,7 @@ from pathlib import Path
 import tokenize
 
 from vyarth.confidence import PROBE_NOTE, REEXPORT_NOTE, SIDE_EFFECT_NOTE
+from vyarth.discover import read_python_source
 from vyarth.model import Finding
 
 
@@ -43,7 +44,7 @@ def render_fix_diff(
 ) -> str:
     """Unified diff of the rewrites. Nothing is written."""
     chunks: list[str] = []
-    for relpath, before, after, _ in _previews(root, list(findings), unsafe=unsafe):
+    for relpath, before, after, _, _ in _previews(root, list(findings), unsafe=unsafe):
         chunks.extend(
             difflib.unified_diff(
                 before.splitlines(keepends=True),
@@ -87,22 +88,30 @@ def rewrite_source(
     except SyntaxError:
         return source, []
     chosen = list(findings)
-    edits = _import_edits(tree, source, chosen, relpath, unsafe=unsafe, verb=verb)
-    edits.extend(_statement_edits(tree, source, chosen, relpath, verb=verb))
-    return _apply_edits(source, edits)
+    removed: dict[int, tuple[int, int]] = {}
+    edits = _import_edits(tree, source, chosen, relpath, unsafe=unsafe, verb=verb, removed=removed)
+    edits.extend(_statement_edits(tree, source, chosen, relpath, verb=verb, removed=removed))
+    edits = _keep_suites(tree, source, edits, removed)
+    updated, notes = _apply_edits(source, edits)
+    try:
+        ast.parse(updated)
+    except SyntaxError:
+        return source, [f"skipped {relpath}: rewrite would not parse"]
+    return updated, notes
 
 
 def _write(root: Path, findings: list[Finding], *, unsafe: bool, write: bool) -> list[str]:
     verb = "fixed" if write else "would fix"
     notes: list[str] = []
-    for relpath, source, updated, edits in _previews(root, findings, unsafe=unsafe, verb=verb):
+    for relpath, source, updated, edits, encoding in _previews(root, findings, unsafe=unsafe, verb=verb):
         if source == updated:
+            notes.extend(edits)
             continue
         if not write:
             notes.extend(edits)
             continue
         path = root / relpath
-        path.write_text(updated, encoding="utf-8")
+        _write_python(path, updated, encoding)
         notes.extend(edits)
     return notes
 
@@ -113,20 +122,20 @@ def _previews(
     *,
     unsafe: bool,
     verb: str = "fixed",
-) -> list[tuple[str, str, str, list[str]]]:
+) -> list[tuple[str, str, str, list[str], str]]:
     grouped: dict[str, list[Finding]] = {}
     for finding in findings:
         grouped.setdefault(finding.path, []).append(finding)
-    previews: list[tuple[str, str, str, list[str]]] = []
+    previews: list[tuple[str, str, str, list[str], str]] = []
     for relpath, items in grouped.items():
         path = root / relpath
         if not path.is_file():
             continue
-        source = path.read_text(encoding="utf-8")
+        source, encoding = read_python_source(path)
         updated, edits = rewrite_source(source, items, relpath, unsafe=unsafe, verb=verb)
-        if updated == source:
+        if updated == source and not edits:
             continue
-        previews.append((relpath, source, updated, edits))
+        previews.append((relpath, source, updated, edits, encoding))
     return previews
 
 
@@ -138,6 +147,7 @@ def _import_edits(
     *,
     unsafe: bool,
     verb: str,
+    removed: dict[int, tuple[int, int]],
 ) -> list[tuple[int, int, str, tuple[str, ...]]]:
     groups: dict[tuple[int, int], tuple[ast.Import | ast.ImportFrom, dict[str, int]]] = {}
     imports = [finding for finding in findings if _import_is_editable(finding, relpath, tree, unsafe)]
@@ -162,14 +172,15 @@ def _import_edits(
         end = node.end_lineno or node.lineno
         if rendered is None:
             replacement = ""
+            removed[node.lineno] = (start, end)
         else:
             indent = lines[start - 1][: len(lines[start - 1]) - len(lines[start - 1].lstrip(" \t"))]
             comment = _trailing_comment(source, node)
             line = f"{indent}{rendered}"
             if comment:
                 line = f"{line}  {comment}"
-            if not line.endswith("\n"):
-                line += "\n"
+            if not line.endswith(("\n", "\r")):
+                line += _line_ending(source)
             replacement = line
         notes = tuple(
             f"{verb} {relpath}:{line_number} {symbol}"
@@ -266,6 +277,7 @@ def _statement_edits(
     relpath: str,
     *,
     verb: str,
+    removed: dict[int, tuple[int, int]],
 ) -> list[tuple[int, int, str, tuple[str, ...]]]:
     parents = _parents(tree)
     locals_at = {
@@ -274,22 +286,18 @@ def _statement_edits(
         if finding.rule == "UNUSED_VARIABLE" and finding.confidence >= 100 and _nested_name(finding)
     }
     edits: list[tuple[int, int, str, tuple[str, ...]]] = []
-    dead_lines = {
-        finding.line
-        for finding in findings
-        if finding.rule == "UNREACHABLE_CODE" and finding.confidence >= 100
-    }
     for finding in findings:
         if finding.confidence < 100:
             continue
         edit: tuple[int, int, str, tuple[str, ...]] | None = None
         if finding.rule == "UNREACHABLE_CODE" and not _sole_yield(source, finding.line):
-            edit = _unreachable_edit(tree, parents, source, finding, relpath, dead_lines, verb)
+            edit = _unreachable_edit(tree, parents, source, finding, relpath, verb)
         elif finding.rule == "UNUSED_FUNCTION" and _nested_name(finding):
             edit = _function_edit(tree, parents, source, finding, relpath, verb)
         elif finding.rule == "UNUSED_VARIABLE" and _nested_name(finding):
             edit = _variable_edit(tree, parents, source, finding, locals_at, relpath, verb)
         if edit is not None:
+            removed[finding.line] = (edit[0], edit[1])
             edits.append(edit)
     return edits
 
@@ -323,43 +331,13 @@ def _unreachable_edit(
     source: str,
     finding: Finding,
     relpath: str,
-    dead_lines: set[int],
     verb: str,
 ) -> tuple[int, int, str, tuple[str, ...]] | None:
     match = _statement_at(tree, finding.line)
     if match is None or not _private_span(match, parents, source):
         return None
     end = match.end_lineno or match.lineno
-    replacement = ""
-    suite = _suite_containing(parents.get(match), match)
-    if suite is not None and suite[0] is match and _suite_is_dead(parents.get(match), suite, dead_lines):
-        lines = source.splitlines(keepends=True)
-        original = lines[match.lineno - 1]
-        indent = original[: len(original) - len(original.lstrip(" \t"))]
-        replacement = f"{indent}pass\n"
-    return match.lineno, end, replacement, (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
-
-
-def _suite_containing(parent: ast.AST | None, node: ast.AST) -> list[ast.stmt] | None:
-    if parent is None:
-        return None
-    for field in ("body", "orelse", "finalbody"):
-        suite = getattr(parent, field, None)
-        if isinstance(suite, list) and node in suite:
-            return suite
-    for handler in getattr(parent, "handlers", ()) or ():
-        if node in handler.body:
-            return handler.body
-    for case in getattr(parent, "cases", ()) or ():
-        if node in case.body:
-            return case.body
-    return None
-
-
-def _suite_is_dead(parent: ast.AST | None, suite: list[ast.stmt], dead_lines: set[int]) -> bool:
-    if parent is None or isinstance(parent, ast.Module):
-        return False
-    return all(getattr(statement, "lineno", None) in dead_lines for statement in suite)
+    return match.lineno, end, "", (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
 
 
 def _function_edit(
@@ -406,14 +384,14 @@ def _variable_edit(
                 continue
             if any((node.lineno, name) not in locals_at for name in names):
                 return None
-            if _has_call(node.value) or not _private_span(node, parents, source):
+            if _has_effect(node.value) or not _private_span(node, parents, source):
                 return None
             end = node.end_lineno or node.lineno
             return node.lineno, end, "", (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
         if isinstance(node, ast.AnnAssign) and node.lineno == finding.line and node.value is not None:
             if not isinstance(node.target, ast.Name) or node.target.id != finding.symbol:
                 continue
-            if _has_call(node.value) or not _private_span(node, parents, source):
+            if _has_effect(node.value) or not _private_span(node, parents, source):
                 return None
             end = node.end_lineno or node.lineno
             return node.lineno, end, "", (f"{verb} {relpath}:{finding.line} {finding.symbol}",)
@@ -510,8 +488,75 @@ def _target_names(target: ast.expr) -> list[str] | None:
     return None
 
 
-def _has_call(node: ast.AST) -> bool:
-    return any(isinstance(item, ast.Call | ast.Await) for item in ast.walk(node))
+_PURE_VALUE = (ast.Constant, ast.Name, ast.Tuple, ast.List, ast.Dict, ast.Set, ast.Load, ast.Store)
+
+
+def _has_effect(node: ast.AST) -> bool:
+    """True when deleting the value could change behavior or drop a binding."""
+    for item in ast.walk(node):
+        if isinstance(item, ast.Dict) and any(key is None for key in item.keys):
+            return True
+        if not isinstance(item, _PURE_VALUE):
+            return True
+    return False
+
+
+def _write_python(path: Path, text: str, encoding: str) -> None:
+    """Write source in the encoding it was read with, including a BOM when present."""
+    path.write_bytes(text.encode(encoding))
+
+
+def _line_ending(source: str) -> str:
+    if "\r\n" in source:
+        return "\r\n"
+    if "\r" in source:
+        return "\r"
+    return "\n"
+
+
+def _keep_suites(
+    tree: ast.AST,
+    source: str,
+    edits: list[tuple[int, int, str, tuple[str, ...]]],
+    removed: dict[int, tuple[int, int]],
+) -> list[tuple[int, int, str, tuple[str, ...]]]:
+    """Insert `pass` when every statement in a non-module suite is being removed."""
+    emptied: set[tuple[int, int]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module):
+            continue
+        for suite in _owned_suites(node):
+            if suite and all(statement.lineno in removed for statement in suite):
+                span = removed.get(suite[0].lineno)
+                if span is not None:
+                    emptied.add(span)
+    if not emptied:
+        return edits
+    lines = source.splitlines(keepends=True)
+    ending = _line_ending(source)
+    adjusted: list[tuple[int, int, str, tuple[str, ...]]] = []
+    for start, end, replacement, notes in edits:
+        if replacement == "" and (start, end) in emptied:
+            original = lines[start - 1] if start - 1 < len(lines) else ""
+            indent = original[: len(original) - len(original.lstrip(" \t"))]
+            replacement = f"{indent}pass{ending}"
+        adjusted.append((start, end, replacement, notes))
+    return adjusted
+
+
+def _owned_suites(node: ast.AST) -> list[list[ast.stmt]]:
+    suites: list[list[ast.stmt]] = []
+    for field in ("body", "orelse", "finalbody"):
+        suite = getattr(node, field, None)
+        if isinstance(suite, list) and suite and isinstance(suite[0], ast.stmt):
+            suites.append(suite)
+    for handler in getattr(node, "handlers", ()) or ():
+        if handler.body:
+            suites.append(handler.body)
+    for case in getattr(node, "cases", ()) or ():
+        if case.body:
+            suites.append(case.body)
+    return suites
 
 
 def _nested_name(finding: Finding) -> bool:

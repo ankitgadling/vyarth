@@ -34,8 +34,15 @@ def changed_python_files(root: Path, ref: str = "HEAD") -> set[str]:
     Raises RuntimeError when git cannot answer.
     """
     prefix = _git_prefix(root)
-    diff_paths = _git_lines(root, ["git", "diff", "--name-only", ref])
-    untracked = _git_lines(root, ["git", "ls-files", "--others", "--exclude-standard", "--full-name"])
+    base = _git_output(root, ["git", "merge-base", ref, "HEAD"]).strip() or ref
+    diff_paths = _git_lines(
+        root,
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", base],
+    )
+    untracked = _git_lines(
+        root,
+        ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "--full-name"],
+    )
     mapped: set[str] = set()
     saw_python = False
     for path in (*diff_paths, *untracked):
@@ -73,11 +80,17 @@ def load_cached(root: Path, relpath: str, stamp: str) -> FileIndex | None:
 
 
 def store_cached(root: Path, relpath: str, stamp: str, index: FileIndex) -> None:
-    ensure_cache_markers(root)
-    path = _cache_path(root, relpath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"stamp": stamp, "index": asdict(index)}
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    """Write one cache record. A read-only project skips the cache instead of failing the scan."""
+    try:
+        ensure_cache_markers(root)
+        path = _cache_path(root, relpath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"stamp": stamp, "index": asdict(index)}
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        return
 
 
 def cache_stamp(size: int, mtime_ns: int, fold: dict[str, str], duplicate_min_statements: int = 5) -> str:
@@ -115,12 +128,18 @@ def prune_cache(root: Path, live_paths: set[str]) -> None:
         try:
             payload = json.loads(file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeError):
-            file.unlink(missing_ok=True)
+            try:
+                file.unlink(missing_ok=True)
+            except OSError:
+                continue
             continue
         index = payload.get("index") if isinstance(payload, dict) else None
         stored = index.get("path") if isinstance(index, dict) else None
         if not isinstance(stored, str) or stored not in live:
-            file.unlink(missing_ok=True)
+            try:
+                file.unlink(missing_ok=True)
+            except OSError:
+                continue
 
 
 def _git_prefix(root: Path) -> str:
@@ -157,6 +176,8 @@ def _git_output(root: Path, args: list[str]) -> str:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
         )
     except OSError as exc:

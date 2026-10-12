@@ -9,10 +9,11 @@ import sys
 from urllib.parse import unquote, urlparse
 
 from vyarth.config import load_config
-from vyarth.discover import discover_files, project_root, relative_posix
+from vyarth.discover import discover_files, project_root, read_python_source, relative_posix
 from vyarth.engine import scan
 from vyarth.fix import is_fixable, rewrite_source
 from vyarth.model import Finding, ScanResult
+from vyarth.report import utf16_column
 
 
 _buffers: dict[Path, str] = {}
@@ -58,13 +59,13 @@ def diagnostics_for(uri: str) -> dict:
     scanned = _scanned(uri)
     if scanned is None:
         return {"kind": "full", "items": []}
-    _, relpath, _, result = scanned
+    _, relpath, source, result = scanned
     items = []
     for finding in result.findings:
         if finding.path != relpath:
             continue
         line = max(finding.line - 1, 0)
-        character = max(finding.column - 1, 0)
+        character = max(utf16_column(source, finding.line, finding.column) - 1, 0)
         items.append(
             {
                 "range": {
@@ -140,11 +141,11 @@ def _dispatch(message: dict) -> dict | None:
     if method in {"textDocument/didOpen", "textDocument/didChange"}:
         _remember_buffer(message)
         return None
-    if method == "textDocument/didSave":
+    if method in {"textDocument/didSave", "textDocument/didClose"}:
         _forget_buffer(message)
         return None
     if request_id is not None:
-        return _result(request_id, None)
+        return _error(request_id, -32601, f"method not found: {method}")
     return None
 
 
@@ -171,7 +172,7 @@ def _scanned(uri: str) -> tuple[Path, str, str, ScanResult] | None:
     if text is None:
         if not path.is_file():
             return None
-        source = path.read_text(encoding="utf-8")
+        source, _ = read_python_source(path)
     else:
         source = text
     return path, relpath, source, result
@@ -313,9 +314,11 @@ def _read_message(stream) -> dict | None:
             break
         key, _, value = line.decode("ascii", errors="replace").partition(":")
         headers[key.strip().lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
+    if "content-length" not in headers:
+        raise ValueError("missing Content-Length")
+    length = int(headers["content-length"])
     if length <= 0:
-        return None
+        raise ValueError("missing Content-Length")
     body = reader.read(length)
     try:
         payload = json.loads(body.decode("utf-8"))

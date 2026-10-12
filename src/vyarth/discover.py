@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from functools import lru_cache
 import os
 from pathlib import Path
+import tokenize
 from typing import Protocol, TypeVar
 
 import pathspec
@@ -52,15 +54,28 @@ def discover_files(root: Path, config: Config, *, within: Path | None = None) ->
     return found
 
 
-def package_roots(root: Path) -> list[Path]:
-    """Scan root, plus `src/` when that directory exists. Longest path wins."""
+def package_roots(root: Path, extra: Iterable[Path] = ()) -> list[Path]:
+    """Scan root, plus `src/` and any extra directories. Longest path wins."""
     root = root.resolve()
-    roots = [root]
+    roots = {root}
     src = root / "src"
     if src.is_dir():
-        roots.append(src)
-    roots.sort(key=lambda path: len(path.as_posix()), reverse=True)
-    return roots
+        roots.add(src.resolve())
+    for item in extra:
+        roots.add(item.resolve())
+    return sorted(roots, key=lambda path: len(path.as_posix()), reverse=True)
+
+
+def read_python_source(path: str | Path) -> tuple[str, str]:
+    """Read a Python file using its coding cookie and BOM.
+
+    The text keeps the file's newlines. The encoding is what `tokenize` detected,
+    including ``utf-8-sig`` when the file starts with a BOM.
+    """
+    with Path(path).open("rb") as handle:
+        encoding, consumed = tokenize.detect_encoding(handle.readline)
+        raw = b"".join(consumed) + handle.read()
+    return raw.decode(encoding), encoding
 
 
 def module_name(path: Path, roots: list[Path]) -> str | None:

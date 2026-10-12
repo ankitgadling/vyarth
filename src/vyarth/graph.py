@@ -16,6 +16,7 @@ from vyarth.project import Project, call_is_dead
 
 
 _ORPHAN_MESSAGE = "No entry point reaches this function."
+_EXTERNAL_BASE_NOTE = "May override a method of an external base."
 _METHOD_MESSAGE = "Method '{name}' is never used."
 _VARIABLE_MESSAGE = "Variable '{name}' is never used."
 _UNRESOLVED_NOTE = "An unresolved attribute call uses this name."
@@ -121,6 +122,22 @@ def orphan_findings(
                     continue
                 if _symbol_referenced(project, index, binding, referenced):
                     findings.append(_orphan(relpath, binding, 80))
+                    continue
+                if _has_external_base(project, index, class_name):
+                    findings.append(
+                        Finding(
+                            rule="UNUSED_FUNCTION",
+                            path=relpath,
+                            line=binding.line,
+                            column=binding.column,
+                            symbol=binding.name,
+                            status="POSSIBLY_DEAD",
+                            confidence=60,
+                            message=_METHOD_MESSAGE.format(name=binding.name),
+                            evidence=("No references found.", _EXTERNAL_BASE_NOTE),
+                            fingerprint=make_fingerprint("UNUSED_FUNCTION", relpath, binding.qualname),
+                        )
+                    )
                     continue
                 findings.append(
                     Finding(
@@ -300,26 +317,7 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
         return None
 
     def _resolve_base(index: FileIndex, spec: str) -> tuple[str, str] | None:
-        if spec.startswith("@expr:"):
-            dotted = spec[len("@expr:") :]
-            dotted_module, separator, attr = dotted.rpartition(".")
-            if not separator:
-                return None
-            module = _module_named(project, index, dotted_module)
-            binding = _module_function(project, module, attr)
-            if module is None or binding is None or binding.kind != "class":
-                return None
-            return module.path, binding.qualname
-        if spec.startswith("@import:"):
-            resolved_path, name = _follow_imports(project, index.path, spec)
-            binding = project.bindings.get(resolved_path, {}).get(name)
-            if binding is not None and binding.kind == "class":
-                return resolved_path, name
-            return None
-        binding = project.bindings.get(index.path, {}).get(spec)
-        if binding is not None and binding.kind == "class":
-            return index.path, spec
-        return None
+        return _project_base(project, index, spec)
 
     def consider_values(path: str, caller: str) -> None:
         for qualname in project.value_uses.get((path, caller), ()):
@@ -344,7 +342,7 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
                 add(path, qualname)
 
     def deferred(path: str, caller: str) -> bool:
-        return "<lambda:" in caller or (path, caller) in project.function_callers
+        return "<lambda:" in caller or "<lambda#" in caller or (path, caller) in project.function_callers
 
     def consider(index: FileIndex, call: CallEdge) -> None:
         if call_is_dead(project, index.path, call.line, call.col_offset):
@@ -683,6 +681,37 @@ def _resolved_mentions(project: Project) -> set[tuple[str, str]]:
             found.add(_follow_imports(project, path, used))
     project.mentions = found
     return found
+
+
+def _project_base(project: Project, index: FileIndex, spec: str) -> tuple[str, str] | None:
+    """Project class a base expression names, or None when the base is external."""
+    if spec.startswith("@expr:"):
+        dotted = spec[len("@expr:") :]
+        dotted_module, separator, attr = dotted.rpartition(".")
+        if not separator:
+            return None
+        module = _module_named(project, index, dotted_module)
+        binding = _module_function(project, module, attr)
+        if module is None or binding is None or binding.kind != "class":
+            return None
+        return module.path, binding.qualname
+    if spec.startswith("@import:"):
+        resolved_path, name = _follow_imports(project, index.path, spec)
+        binding = project.bindings.get(resolved_path, {}).get(name)
+        if binding is not None and binding.kind == "class":
+            return resolved_path, name
+        return None
+    binding = project.bindings.get(index.path, {}).get(spec)
+    if binding is not None and binding.kind == "class":
+        return index.path, spec
+    return None
+
+
+def _has_external_base(project: Project, index: FileIndex, class_name: str) -> bool:
+    bases = dict(index.class_bases).get(class_name)
+    if not bases:
+        return False
+    return any(_project_base(project, index, base) is None for base in bases)
 
 
 def _symbol_referenced(

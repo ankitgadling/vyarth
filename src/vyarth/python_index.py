@@ -696,8 +696,9 @@ class _Indexer(ast.NodeVisitor):
         self.scope = self.scope.parent
 
     def _fresh(self, prefix: str) -> str:
-        self._counter += 1
-        return f"<{prefix}:{self._counter}>"
+        """Number anonymous scopes inside their parent, so earlier defs do not shift them."""
+        number = sum(1 for child in self.scope.children if child.kind == prefix) + 1
+        return f"<{prefix}#{number}>"
 
     def _resolve_loads(self) -> None:
         wildcard = any(edge.is_wildcard for edge in self.imports)

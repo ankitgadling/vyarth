@@ -1,5 +1,7 @@
 """Regressions for analysis bugs found in review."""
 
+import pytest
+
 from vyarth import scan
 from vyarth.fix import apply_fixes, apply_import_fixes, rewrite_source
 from vyarth.incremental import cache_stamp
@@ -198,7 +200,6 @@ def test_exits_cover_try_loop_with_match_and_for_else(tmp_path):
     assert unreachable == [
         "print('try')",
         "print('loop')",
-        "print('with')",
         "print('with-loop')",
         "print('match')",
         "print('else')",
@@ -938,7 +939,11 @@ def test_pyopenssl_import_satisfies_the_dependency(tmp_path):
     )
 
 
-def test_dev_only_dependency_scores_70(tmp_path):
+def test_dev_only_dependency_scores_70(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_map",
+        lambda: {"runtime-missing": ["runtime-missing"]},
+    )
     write_tree(
         tmp_path,
         {
@@ -1123,3 +1128,299 @@ def test_dev_optional_extra_scores_70(tmp_path):
     }
     assert reported["ruff"].confidence == 70
     assert "development or docs" in reported["ruff"].evidence[0]
+
+
+def test_fix_keeps_a_suite_when_its_only_statement_is_removed(tmp_path):
+    path = tmp_path / "a.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from collections.abc import Iterator\n"
+        "\n"
+        "def handler(data):\n"
+        "    try:\n"
+        "        return data['k']\n"
+        "    except KeyError:\n"
+        "        missing = True\n"
+        "\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    handler({})\n"
+        "    outer()\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(path).findings)
+    text = path.read_text(encoding="utf-8")
+    ast = __import__("ast")
+    ast.parse(text)
+    assert "Iterator" not in text
+    assert "missing = True" not in text
+    assert "def inner" not in text
+    assert text.count("pass") >= 3
+
+
+def test_fix_leaves_assignments_with_side_effects(tmp_path):
+    path = tmp_path / "a.py"
+    path.write_text(
+        "def ticker():\n"
+        "    while True:\n"
+        "        tick = yield\n"
+        "        print('tick')\n"
+        "\n"
+        "def require(d):\n"
+        "    value = d['token']\n"
+        "    return True\n"
+        "\n"
+        "def bound(xs):\n"
+        "    _x = (n := 10)\n"
+        "    return n\n"
+        "\n"
+        "def plain():\n"
+        "    unused = 1\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    ticker()\n"
+        "    require({})\n"
+        "    bound([])\n"
+        "    plain()\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(path).findings)
+    text = path.read_text(encoding="utf-8")
+    assert "tick = yield" in text
+    assert "d['token']" in text
+    assert "n :=" in text
+    assert "unused = 1" not in text
+
+
+def test_fix_preserves_crlf(tmp_path):
+    path = tmp_path / "a.py"
+    path.write_bytes(
+        b"import os\r\n"
+        b"def main():\r\n"
+        b"    return 1\r\n"
+        b"\r\n"
+        b"if __name__ == '__main__':\r\n"
+        b"    main()\r\n"
+    )
+    apply_fixes(tmp_path, scan(path).findings)
+    raw = path.read_bytes()
+    assert b"\r\n" in raw
+    assert b"import os" not in raw
+    assert b"\n" not in raw.replace(b"\r\n", b"")
+
+
+def test_external_base_methods_score_60(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "main.py": (
+                "import json\n"
+                "import threading\n"
+                "\n"
+                "class Enc(json.JSONEncoder):\n"
+                "    def default(self, o):\n"
+                "        return str(o)\n"
+                "\n"
+                "class Worker(threading.Thread):\n"
+                "    def run(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Box:\n"
+                "    def close(self):\n"
+                "        return 1\n"
+                "\n"
+                "def main():\n"
+                "    Enc()\n"
+                "    Worker()\n"
+                "    Box()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_FUNCTION"}
+    assert findings["default"].confidence == 60
+    assert "external base" in findings["default"].evidence[-1]
+    assert findings["run"].confidence == 60
+    assert findings["close"].confidence == 96
+
+
+def test_duplicate_hash_keeps_free_names(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "a.py": (
+                "def clamp_low(a, b, c, d):\n"
+                "    x = min(a, b)\n"
+                "    y = min(c, d)\n"
+                "    z = min(x, y)\n"
+                "    print(z)\n"
+                "    return z\n"
+                "\n"
+                "def clamp_high(a, b, c, d):\n"
+                "    x = max(a, b)\n"
+                "    y = max(c, d)\n"
+                "    z = max(x, y)\n"
+                "    print(z)\n"
+                "    return z\n"
+                "\n"
+                "def main():\n"
+                "    return clamp_low(1, 2, 3, 4) + clamp_high(1, 2, 3, 4)\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    assert not any(item.rule == "DUPLICATE_CODE" for item in scan(tmp_path).findings)
+
+
+def test_unknown_distribution_scores_70(tmp_path, monkeypatch):
+    monkeypatch.setattr("vyarth.dependencies._distribution_map", lambda: {})
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'app'\nversion = '0.1'\ndependencies = ['attrs']\n",
+            "main.py": "import attr\nattr\n",
+        },
+    )
+    finding = next(item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY")
+    assert finding.symbol == "attrs"
+    assert finding.confidence == 70
+    assert "metadata" in finding.evidence[0]
+
+
+def test_namespace_distributions_are_not_all_marked_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_map",
+        lambda: {"google": ["google-cloud-storage", "protobuf"]},
+    )
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                "[project]\n"
+                "name = 'app'\n"
+                "version = '0.1'\n"
+                "dependencies = ['google-cloud-storage', 'protobuf']\n"
+            ),
+            "main.py": "import google\ngoogle\n",
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert findings["google-cloud-storage"].confidence == 70
+    assert findings["protobuf"].confidence == 70
+
+
+def test_bom_and_coding_cookie_files_are_indexed(tmp_path):
+    bom = tmp_path / "bom.py"
+    bom.write_bytes(b"\xef\xbb\xbfdef dead():\n    return 1\n")
+    latin = tmp_path / "latin.py"
+    latin.write_bytes("# -*- coding: latin-1 -*-\nvalue = 'caf\xe9'\n".encode("latin-1"))
+    bom_result = scan(bom)
+    latin_result = scan(latin)
+    assert bom_result.errors == ()
+    assert any(item.symbol == "dead" for item in bom_result.findings)
+    assert latin_result.errors == ()
+    fixed = tmp_path / "fixed.py"
+    fixed.write_bytes(
+        b"\xef\xbb\xbfimport os\n"
+        b"def main():\n"
+        b"    return 1\n"
+        b"\n"
+        b"if __name__ == '__main__':\n"
+        b"    main()\n"
+    )
+    apply_fixes(tmp_path, scan(fixed).findings)
+    raw = fixed.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")
+    assert b"import os" not in raw
+
+
+def test_symlinked_requirements_outside_the_root_do_not_abort(tmp_path):
+    root = tmp_path / "api"
+    shared = tmp_path / "shared"
+    write_tree(
+        root,
+        {
+            "pyproject.toml": "[project]\nname = 'api'\nversion = '0.1'\n",
+            "app.py": "def dead():\n    return 1\n",
+        },
+    )
+    shared.mkdir()
+    (shared / "requirements.txt").write_text("not-a-real-package\n", encoding="utf-8")
+    link = root / "requirements.txt"
+    try:
+        link.symlink_to(shared / "requirements.txt")
+    except OSError:
+        pytest.skip("symlinks are not available")
+    result = scan(root)
+    assert result.errors == ()
+    assert any(item.symbol == "dead" for item in result.findings)
+
+
+def test_nested_directory_is_its_own_package_root(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'repo'\nversion = '0.1'\n",
+            "examples/app/main.py": (
+                "import app.service\n"
+                "\n"
+                "def main():\n"
+                "    return app.service.run()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+            "examples/app/app/__init__.py": "",
+            "examples/app/app/service.py": "def run():\n    return 1\n\ndef spare():\n    return 2\n",
+        },
+    )
+    result = scan(tmp_path / "examples" / "app")
+    spare = [item for item in result.findings if item.symbol == "spare"]
+    assert len(spare) == 1
+    assert spare[0].path.endswith("app/service.py")
+    assert not any(item.symbol == "run" for item in result.findings)
+
+
+def test_comprehension_fingerprint_stays_when_a_function_is_inserted(tmp_path):
+    path = tmp_path / "a.py"
+    path.write_text("def f():\n    return [1 for i in range(3)]\n\nf()\n", encoding="utf-8")
+    before = next(item.fingerprint for item in scan(path).findings if item.symbol == "i")
+    path.write_text(
+        "def earlier():\n    return 1\n\ndef f():\n    return [1 for i in range(3)]\n\nearlier()\nf()\n",
+        encoding="utf-8",
+    )
+    after = next(item.fingerprint for item in scan(path).findings if item.symbol == "i")
+    assert before == after
+    assert "<comprehension#1>" in before
+
+
+def test_ignore_bases_covers_a_class_nested_in_a_function(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "vyarth.toml": 'ignore_bases = ["Plugin"]\n',
+            "app.py": (
+                "class Plugin:\n"
+                "    pass\n"
+                "\n"
+                "def factory():\n"
+                "    class Impl(Plugin):\n"
+                "        def handle(self):\n"
+                "            return 1\n"
+                "    return Impl\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    factory()\n"
+            ),
+        },
+    )
+    assert not any(item.symbol == "handle" for item in scan(tmp_path).findings)

@@ -35,7 +35,7 @@ def scan(
 
 `defines` merges into the fold map from config. Keys in `defines` win.
 
-`changed=True` on a directory scan keeps findings in Python files from `git diff --name-only <changed_from>` and from untracked files. Paths are mapped into the project when it sits below the git root. Git failures raise `RuntimeError`. An empty mapped set returns a result with no findings and `files_scanned == 0`.
+`changed=True` on a directory scan keeps findings in Python files from `git diff` against the merge-base of `changed_from` and `HEAD`, and from untracked files. Paths are mapped into the project when it sits below the git root. Git failures raise `RuntimeError`. An empty mapped set returns a result with no findings and `files_scanned == 0`.
 
 `use_cache=False` reparses every file. Single-file scans do not read or write the cache.
 

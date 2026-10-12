@@ -28,17 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser = subcommands.add_parser("scan", help="Scan a file or directory")
     _add_scan_arguments(scan_parser)
     baseline_parser = subcommands.add_parser("baseline", help="Write a fingerprint baseline for the current findings")
-    baseline_parser.add_argument("path", nargs="?", default=".", help="File or directory to scan. Default: the current directory.")
+    _add_scan_arguments(baseline_parser)
     baseline_parser.add_argument(
         "--output",
         "-o",
         default="vyarth-baseline.json",
         help="Baseline file to write. A relative path is resolved from the project root. Default: vyarth-baseline.json.",
-    )
-    baseline_parser.add_argument(
-        "--config",
-        default=None,
-        help="Read this TOML file instead of discovering pyproject.toml or vyarth.toml.",
     )
     fix_parser = subcommands.add_parser("fix", help="Remove safe dead code and rescan")
     _add_scan_arguments(fix_parser)
@@ -75,7 +70,18 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "baseline":
-            result = _scan_with_progress(target, config=config, apply_baseline=False, quiet=False)
+            result = _scan_with_progress(
+                target,
+                config=config,
+                min_confidence=args.min_confidence,
+                apply_baseline=False,
+                workers=args.workers,
+                defines=defines or None,
+                changed=args.changed,
+                changed_from=args.changed_from,
+                use_cache=not args.no_cache,
+                quiet=args.quiet,
+            )
             output = Path(args.output)
             if not output.is_absolute():
                 output = root / output
@@ -143,7 +149,7 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--min-confidence",
-        type=int,
+        type=_bounded_int(0, 100),
         default=None,
         help="Drop findings below this score. Overrides the config value.",
     )
@@ -160,7 +166,7 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--workers",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="Process pool size. 1 stays in-process. 0 uses the CPU count. Overrides the config value.",
     )
@@ -213,12 +219,35 @@ def _render(result: ScanResult, fmt: str, root: Path) -> str:
     if fmt == "json":
         return render_json(result)
     if fmt == "sarif":
-        return render_sarif(result)
+        return render_sarif(result, root=root)
     if fmt == "github":
         return render_github(result, root=root)
     if fmt == "concise":
         return render_concise(result)
     return render_text(result)
+
+
+def _bounded_int(low: int, high: int):
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("expected an integer") from exc
+        if not low <= number <= high:
+            raise argparse.ArgumentTypeError(f"must be between {low} and {high}")
+        return number
+
+    return parse
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("workers must be an integer") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError("workers must be zero or a positive integer")
+    return number
 
 
 def _defines(values: list[str] | None) -> dict[str, str]:

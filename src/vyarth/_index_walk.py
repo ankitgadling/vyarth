@@ -252,13 +252,30 @@ def _body_signature(node: ast.FunctionDef | ast.AsyncFunctionDef, minimum: int) 
     count = len(body)
     if count < minimum:
         return "", count
-    tokens = [_shape(statement) for statement in body]
+    tokens = [_shape(statement, _local_names(node)) for statement in body]
     digest = hashlib.sha256("\n".join(tokens).encode("utf-8")).hexdigest()
     return digest, count
 
-def _shape(node: ast.AST) -> str:
+def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Parameters and names stored in the function. Free names stay in the hash."""
+    names: set[str] = set()
+    arguments = node.args
+    for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+        names.add(arg.arg)
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+            names.add(child.id)
+        elif isinstance(child, ast.ExceptHandler) and child.name:
+            names.add(child.name)
+    return frozenset(names)
+
+def _shape(node: ast.AST, local_names: frozenset[str]) -> str:
     if isinstance(node, ast.Name):
-        return "Name"
+        return "Name" if node.id in local_names else f"Global:{node.id}"
     if isinstance(node, ast.Constant):
         return f"Const:{node.value!r}"
     if isinstance(node, ast.arg):
@@ -268,9 +285,9 @@ def _shape(node: ast.AST) -> str:
         if field in {"lineno", "col_offset", "end_lineno", "end_col_offset", "ctx", "type_comment", "decorator_list"}:
             continue
         if isinstance(value, ast.AST):
-            parts.append(_shape(value))
+            parts.append(_shape(value, local_names))
         elif isinstance(value, list):
-            bits = [_shape(item) if isinstance(item, ast.AST) else repr(item) for item in value]
+            bits = [_shape(item, local_names) if isinstance(item, ast.AST) else repr(item) for item in value]
             parts.append("[" + ",".join(bits) + "]")
         else:
             parts.append(repr(value))
@@ -470,7 +487,8 @@ def _stmt_always_exits(statement: ast.stmt) -> bool:
             return True
         return False
     if isinstance(statement, ast.With | ast.AsyncWith):
-        return _block_always_exits(statement.body)
+        # __exit__ may swallow the exception (contextlib.suppress, pytest.raises, ...).
+        return False
     if isinstance(statement, ast.Try | ast.TryStar):
         if statement.finalbody and _block_always_exits(statement.finalbody):
             return True

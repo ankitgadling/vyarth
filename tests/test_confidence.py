@@ -115,7 +115,7 @@ def test_requirement_aliases_score_70_when_the_import_name_is_used(tmp_path, mon
 
 
 def test_requirement_alias_scores_70_when_the_import_is_used(tmp_path, monkeypatch):
-    monkeypatch.setattr("vyarth.dependencies._distribution_map", lambda: {})
+    monkeypatch.setattr("vyarth.dependencies._distribution_map", lambda: {"urllib3": ["urllib3"]})
     write_tree(
         tmp_path,
         {
@@ -130,7 +130,8 @@ def test_requirement_alias_scores_70_when_the_import_is_used(tmp_path, monkeypat
     assert findings["urllib3"].confidence == 95
 
 
-def test_requirement_alias_stays_95_when_neither_name_is_imported(tmp_path):
+def test_requirement_alias_stays_95_when_neither_name_is_imported(tmp_path, monkeypatch):
+    monkeypatch.setattr("vyarth.dependencies._distribution_map", lambda: {"pyjwt": ["pyjwt"]})
     write_tree(
         tmp_path,
         {

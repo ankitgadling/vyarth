@@ -93,7 +93,11 @@ def test_getattr_lowers_unused_function_confidence(tmp_path):
     assert "No references found." in finding.evidence
 
 
-def test_unused_requirement_is_reported(tmp_path):
+def test_unused_requirement_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_map",
+        lambda: {"old-package": ["old-package"], "pathspec": ["pathspec"]},
+    )
     write_tree(
         tmp_path,
         {

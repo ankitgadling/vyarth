@@ -106,3 +106,11 @@ def test_vyarth_toml_config(tmp_path):
     symbols = {finding.symbol for finding in scan(tmp_path).findings}
     assert "dead" not in symbols
     assert "live_unused" in symbols
+
+
+def test_trailing_ignore_does_not_hide_the_next_line(tmp_path):
+    path = tmp_path / "mod.py"
+    path.write_text("import os  # vyarth: ignore\nimport sys\n", encoding="utf-8")
+    symbols = {finding.symbol for finding in scan(path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "os" not in symbols
+    assert "sys" in symbols
