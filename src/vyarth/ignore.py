@@ -49,7 +49,8 @@ def collect_ignores(source: str) -> tuple[IgnoreDirective, ...]:
                     for part in raw_rules.split(",")
                     if part.strip()
                 )
-            directives.append(IgnoreDirective(line=token.start[0], rules=rules))
+            standalone = token.line.strip().startswith("#")
+            directives.append(IgnoreDirective(line=token.start[0], rules=rules, exact=not standalone))
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return ()
     return tuple(directives)

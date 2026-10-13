@@ -31,10 +31,11 @@ Findings go to standard output. Progress is written to standard error. The proce
 
 ```text
 UNUSED_VARIABLE
-File: service.py
-Line: 3
+File: examples/dead_code_app/app/service.py
+Line: 29
 Variable: debug_value
 Confidence: 100%
+Evidence: No references found.
 ```
 
 ```python

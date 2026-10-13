@@ -39,14 +39,14 @@ vyarth scan . --quiet --exclude experiments/**
 | `--workers N` | Process pool size. `1` stays in-process. `0` uses the CPU count. Overrides the config value. |
 | `--define NAME=VALUE` | Fold this name as a constant. Repeat the flag for more names. |
 | `--changed` | Index the project, then keep findings only in Python files changed against git. |
-| `--changed-from REF` | Git ref for `--changed`. Default: `HEAD`. |
+| `--changed-from REF` | Git ref for `--changed`. The diff uses the merge-base of `REF` and `HEAD`. Default: `HEAD`. |
 | `--no-cache` | Reparse every file. The cache lives in `.vyarth/cache`. |
 | `--quiet` | Do not print scan progress. |
 | `--exclude PATTERN` | Do not index paths matching this pattern. Repeat the flag to add more. |
 
 `--fail-on` still prints every finding that passes the other filters. The exit code is the only thing it changes. With no `--fail-on` and no `fail_on` in config, any remaining finding exits 1.
 
-`--changed` reads `git diff --name-only` and `git ls-files --others --exclude-standard` against the ref. Paths are mapped into the project even when that project sits below the git root, and untracked Python files are included. The scan still indexes the whole project so imports and calls from unchanged files keep symbols alive. The report then keeps findings whose path is in that set. An empty set prints nothing and exits 0. If git reports Python paths and none of them fall inside the project, vyarth prints a warning on standard error. A directory that is not a git repository exits 2.
+`--changed` reads `git diff --name-only` against the merge-base of the ref and `HEAD`, plus `git ls-files --others --exclude-standard`. Non-ASCII paths are kept. Paths are mapped into the project even when that project sits below the git root, and untracked Python files are included. The scan still indexes the whole project so imports and calls from unchanged files keep symbols alive. The report then keeps findings whose path is in that set. An empty set prints nothing and exits 0. If git reports Python paths and none of them fall inside the project, vyarth prints a warning on standard error. A directory that is not a git repository exits 2.
 
 ## `baseline`
 
@@ -56,7 +56,7 @@ vyarth baseline . --output path/to/baseline.json
 vyarth baseline . --config vyarth.toml
 ```
 
-Writes a sorted fingerprint list. The default file is `vyarth-baseline.json` in the project root. A relative `--output` is resolved from that root. See [Continuous integration](continuous-integration.md).
+Writes a sorted fingerprint list. The default file is `vyarth-baseline.json` in the project root. A relative `--output` is resolved from that root. `baseline` accepts the same scan flags as `scan`, including `--quiet`, `--exclude`, and `--min-confidence`, and it does not apply an existing baseline. See [Continuous integration](continuous-integration.md).
 
 ## `fix`
 

@@ -161,3 +161,27 @@ def test_assert_does_not_end_the_block(tmp_path):
         "\n"
         "foo()\n",
     ) == []
+
+
+def test_suppressing_with_does_not_kill_the_next_statement(tmp_path):
+    source = (
+        "from contextlib import suppress\n"
+        "\n"
+        "def lookup(cache, key):\n"
+        "    with suppress(KeyError):\n"
+        "        return cache[key]\n"
+        "        print('inside')\n"
+        "    return compute(key)\n"
+        "\n"
+        "def compute(key):\n"
+        "    return key * 2\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    print(lookup({}, 3))\n"
+    )
+    assert _unreachable(tmp_path, source) == ["print('inside')"]
+    path = tmp_path / "mod.py"
+    apply_fixes(tmp_path, scan(path).findings)
+    text = path.read_text(encoding="utf-8")
+    assert "return compute(key)" in text
+    assert "def compute" in text

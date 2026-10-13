@@ -9,7 +9,7 @@ import re
 import tomllib
 
 from vyarth.config import Config
-from vyarth.discover import exclusion_specs, path_excluded, relative_posix
+from vyarth.discover import exclusion_specs, path_excluded, read_python_source, relative_posix
 from vyarth.model import FileIndex, Finding, ParseError, make_fingerprint
 
 
@@ -18,6 +18,7 @@ _PEP503 = re.compile(r"[-_.]+")
 _MESSAGE = "No Python imports found."
 _DEV_EVIDENCE = "Declared in {path} as a development or docs dependency and never imported."
 _NAMESPACE_NOTE = "A top-level import uses this package's namespace, so the dependency cannot be proved unused."
+_METADATA_NOTE = "Distribution metadata is unavailable, so the package cannot be proved unused."
 _RUNTIME_NOTE = "This package is often started without an import."
 _RUNTIME_ONLY = frozenset(
     {
@@ -112,7 +113,7 @@ def dependency_findings(
         if alias is not None and _canonical(alias) in imported:
             confidence = 70
             evidence = (f"Imported as {alias}, so the package name cannot be proved unused.",)
-        elif _import_match(name, modules) == "namespace":
+        elif _import_match(name, modules) == "namespace" or _shared_namespace(name, modules):
             confidence = 70
             evidence = (_NAMESPACE_NOTE,)
         elif dev:
@@ -123,6 +124,9 @@ def dependency_findings(
         elif name in _RUNTIME_ONLY:
             confidence = 70
             evidence = (_RUNTIME_NOTE,)
+        elif name not in _known_distributions():
+            confidence = 70
+            evidence = (_METADATA_NOTE,)
         else:
             confidence = 95
             evidence = (f"Declared in {relpath} and never imported.",)
@@ -175,7 +179,29 @@ def _used_distributions(modules: set[str]) -> set[str]:
     mapping = _distribution_map()
     found: set[str] = set()
     for module in modules:
-        for dist in mapping.get(_top_level(module), ()):
+        dists = mapping.get(_top_level(module), ())
+        if len(dists) != 1:
+            continue
+        found.add(_canonical(str(dists[0])))
+    return found
+
+
+def _shared_namespace(name: str, modules: set[str]) -> bool:
+    """True when this distribution shares an imported top-level with other distributions."""
+    imported = {_top_level(module) for module in modules}
+    for top, dists in _distribution_map().items():
+        if top not in imported or len(dists) < 2:
+            continue
+        if any(_canonical(str(dist)) == name for dist in dists):
+            return True
+    return False
+
+
+def _known_distributions() -> set[str]:
+    """Canonical names of distributions installed in this interpreter."""
+    found: set[str] = set()
+    for dists in _distribution_map().values():
+        for dist in dists:
             found.add(_canonical(str(dist)))
     return found
 
@@ -262,8 +288,7 @@ def _read_manifest(path: Path, root: Path) -> tuple[list[tuple[str, int, bool]],
         if path.name == "setup.py":
             return _tag(_setup(path), False), None
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError, ValueError) as exc:
-        relative = path.resolve().relative_to(root).as_posix()
-        return [], ParseError(path=relative, line=1, column=1, message=str(exc))
+        return [], ParseError(path=relative_posix(path, root), line=1, column=1, message=str(exc))
     return [], None
 
 
@@ -280,7 +305,10 @@ def _requirements(path: Path) -> list[tuple[str, int]]:
 
 
 def _docs_requirements(path: Path, root: Path) -> bool:
-    relative = path.resolve().relative_to(root.resolve())
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
     return relative.name == "requirements.txt" and "docs" in relative.parts
 
 
@@ -338,7 +366,8 @@ def _pipfile(path: Path) -> list[tuple[str, int, bool]]:
 
 def _setup(path: Path) -> list[tuple[str, int]]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source, _ = read_python_source(path)
+        tree = ast.parse(source, filename=str(path))
     except SyntaxError:
         return []
     packages: list[tuple[str, int]] = []

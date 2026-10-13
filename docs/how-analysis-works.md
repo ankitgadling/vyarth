@@ -39,13 +39,13 @@ A symbol is an entry when:
 - it is a method named `ready`
 - `frameworks` includes `django` and it is a class named `Meta`, or a module-level name `urlpatterns`
 - `frameworks` includes `celery` and it is a module-level name `beat_schedule`
-- its class has a base listed in `ignore_bases`, which also covers that class’s methods and attributes
+- its class has a base listed in `ignore_bases`, which also covers that class’s methods and attributes, including a class nested in a function
 
 The built-in decorator hooks, matched on the final attribute, are `route`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `task`, `shared_task`, `command`, `group`, and `fixture`. `framework_decorators` adds more names. `@property`, `@staticmethod`, `@classmethod`, and the abstract-method decorators are recorded and are not entries by themselves.
 
 ## Reachability
 
-From each entry module, Vyarth follows imports. A relative import is resolved against the importing file. In a project that contains `src/`, a file is reachable under both the src-layout name (`account.cache`) and the path from the project root (`src.account.cache`).
+From each entry module, Vyarth follows imports. A relative import is resolved against the importing file. In a project that contains `src/`, a file is reachable under both the src-layout name (`account.cache`) and the path from the project root (`src.account.cache`). A directory scan of a nested folder also treats that folder as a package root, so `vyarth scan examples/app` resolves `import app.service` when `examples/app/app/service.py` exists.
 
 A module that no entry can import is `POSSIBLY_UNUSED_MODULE`. Modules that import only each other are both unused, because nothing outside the cycle starts the walk.
 
@@ -72,7 +72,7 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Situation | Score |
 | --- | --- |
 | Module-level function or class with no references | 96 |
-| Unreferenced method on a used class | 96 |
+| Unreferenced method on a used class | 96, or 60 when the class has a base outside the project |
 | Unreferenced attribute on a used class | 96 |
 | Decorated, and the decorator is not an entry | 75 |
 | The name appears as a string in `getattr`, `setattr`, `eval`, or `exec` | 70 |
@@ -96,6 +96,7 @@ These are outside what the current indexer proves:
 - A string built at runtime and passed to `getattr` or `importlib` is invisible. Only literal names lower confidence.
 - A name loaded inside a lambda counts as a use, so an import or variable used only there is kept. A function or class that the lambda would call does not count until something calls the lambda.
 - `assert` is not an exit, so code after a failing assert is still treated as live.
+- A `with` statement is not an exit. Context managers such as `contextlib.suppress` can swallow the exception and continue after the block.
 - An unresolved attribute call does not match a specific class. It only lowers the score of that method name.
 - Fuzzy clone detection is not implemented. Duplicates are exact structural matches.
 - Parameters are not reported.

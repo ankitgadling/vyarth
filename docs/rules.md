@@ -7,14 +7,14 @@ Each finding has a rule, a status, a confidence from 0 to 100, a message, eviden
 | Rule | Meaning | Confidence | Status |
 | --- | --- | --- | --- |
 | `UNUSED_IMPORT` | Import name never loaded | 100, or 70 for a dynamic import, an `ImportError` probe, a possible `__init__.py` re-export, or a dotted side-effect import | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 96 at module level or on a used class, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
+| `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 96 at module level or on a used class, 60 when the class has an external base, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 96 at module level, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_VARIABLE` | Module, class, or function variable never read | 100 in a function or at module level, 96 for an unreferenced attribute on a used class, 70 or 60 when a dynamic or unresolved call uses the name | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNREACHABLE_CODE` | Statement after an exit, or a literal `False` branch | 100 | `DEAD` |
 | `ORPHAN_FUNCTION` | Referenced, but no entry point reaches it | 80, or 60 when an unresolved attribute call uses the name | `POSSIBLY_DEAD` |
 | `POSSIBLY_UNUSED_MODULE` | No entry module can import this file | 82, or 60 when the project imports dynamically | `POSSIBLY_UNUSED_MODULE` |
 | `WILDCARD_IMPORT` | `from module import *` limits analysis | 100 | `ANALYSIS_LIMIT` |
-| `UNUSED_DEPENDENCY` | Declared package with no import | 95, or 70 when the import name differs, the match is only a shared top-level namespace, or the package is a runtime-only or reported development dependency | `POSSIBLY_DEAD` |
+| `UNUSED_DEPENDENCY` | Declared package with no import | 95, or 70 when the import name differs, the match is only a shared top-level namespace, distribution metadata is unavailable, or the package is a runtime-only or reported development dependency | `POSSIBLY_DEAD` |
 | `DUPLICATE_CODE` | Function body matches another function | 90 | `POSSIBLY_DUPLICATE` |
 
 Findings inside a possibly unused module do not score above that module, except `UNREACHABLE_CODE`, which stays at 100. Those findings disappear with the module under `--min-confidence 90`. When that cap, or the Alembic adjustment, lowers a `DEAD` finding below 100, the status becomes `POSSIBLY_DEAD`. `POSSIBLY_DUPLICATE` and `ANALYSIS_LIMIT` stay as they are.
@@ -41,7 +41,7 @@ A module-level function or class with no references is `POSSIBLY_DEAD` at 96% wh
 
 A nested function with no dynamic name and no decorator stays at 100%.
 
-An unreferenced method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
+An unreferenced method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` A method on a class that has a base outside the project, such as `threading.Thread` or `json.JSONEncoder`, scores 60 instead, with evidence that it may override a method of that external base. `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
 
 A decorator that is not a recognized entry lowers the score to 75%, including a nested function. `@property`, `@staticmethod`, and `@classmethod` are recorded and are not entries by themselves. See [How analysis works](how-analysis-works.md) for the decorator list.
 
@@ -68,7 +68,7 @@ The imported name is unused when nothing in that file loads it and it is not re-
 
 ## `UNREACHABLE_CODE`
 
-Reported after `return`, `raise`, `break`, or `continue`, and after `sys.exit()` or `os._exit()`. A branch whose test is the constant `False` is unreachable. `assert` is not an exit. A `for` over an empty literal or an empty `range` makes the body unreachable. A loop `else` is unreachable when the body cannot finish normally, because it always `break`s, `return`s, or `raise`s. `vyarth fix` leaves a `yield` or `yield from` in place when it is the only yield in its function, because deleting it would turn a generator into a normal function. The finding stays.
+Reported after `return`, `raise`, `break`, or `continue`, and after `sys.exit()` or `os._exit()`. A branch whose test is the constant `False` is unreachable. `assert` is not an exit. A `with` or `async with` is not an exit either: `__exit__` may swallow the exception, as `contextlib.suppress` and `pytest.raises` do. Code after a `return` inside the `with` body is still unreachable. A `for` over an empty literal or an empty `range` makes the body unreachable. A loop `else` is unreachable when the body cannot finish normally, because it always `break`s, `return`s, or `raise`s. `vyarth fix` leaves a `yield` or `yield from` in place when it is the only yield in its function, because deleting it would turn a generator into a normal function. The finding stays.
 
 Folded environment checks use the same rule. With `ENVIRONMENT` folded to `production`, the body of `if os.getenv("ENVIRONMENT") == "development":` is unreachable, and calls inside it do not count.
 
@@ -101,17 +101,17 @@ The package `python` is skipped. Requirement lines that are comments, `-r`, `-c`
 
 Names are compared with [PEP 503](https://peps.python.org/pep-0503/) normalization: lowercase, and each run of `.`, `_`, and `-` becomes one `-`. The full imported module string is kept, not only the top-level name. These install names match their import names and are not reported: `pillow` / `PIL`, `pyyaml` / `yaml`, `scikit-learn` / `sklearn`, `opencv-python` / `cv2`, `beautifulsoup4` / `bs4`, `pyopenssl` / `OpenSSL`. `psycopg2-binary`, `pyjwt`, `python-dotenv`, and `python-jose` stay reported at 70% when the code imports `psycopg2`, `jwt`, `dotenv`, or `jose` and installed distribution metadata does not connect them.
 
-When `importlib.metadata.packages_distributions()` is available, a declared package is used if its distribution provides an imported top-level module. Otherwise a hyphenated name that equals an imported module, or matches on a dotted boundary such as `zope.interface` or `google.cloud.storage`, is used. A top-level-only overlap, such as `import google` against `google-cloud-storage`, stays a finding at 70, with evidence that the namespace was imported.
+When `importlib.metadata.packages_distributions()` lists the declared distribution, a package is used if it is the only distribution that provides an imported top-level module. A top-level shared by more than one installed distribution, such as `google`, does not mark every one of those distributions used. A hyphenated name that equals an imported module, or matches on a dotted boundary such as `zope.interface` or `google.cloud.storage`, is used. A top-level-only overlap, such as `import google` against `google-cloud-storage`, stays a finding at 70, with evidence that the namespace was imported. A declared distribution that is not installed in the interpreter running Vyarth scores 70, with evidence that distribution metadata is unavailable.
 
 Packages that are often started without an import stay reported at 70, not 95: `gunicorn`, `uvicorn`, `hypercorn`, `daphne`, `waitress`, `gevent`, `eventlet`, `psycopg`, `psycopg2`, `psycopg2-binary`, `mysqlclient`, `pymysql`, `asyncpg`, `redis`, `hiredis`, and `whitenoise`.
 
-A package declared only in a development or docs manifest is not reported. That covers `requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, and a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`. Set `report_dev_dependencies = true` to report those at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package with no matching import stays at 95%, with the message `No Python imports found.`
+A package declared only in a development or docs manifest is not reported. That covers `requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, and a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`. Set `report_dev_dependencies = true` to report those at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package that is installed in this interpreter and has no matching import stays at 95%, with the message `No Python imports found.`
 
 Scanning a single file skips this rule. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt`, or a manifest excluded by config or `.gitignore`. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
 
 ## `DUPLICATE_CODE`
 
-Duplicate detection hashes statement shape and constants. Local names are ignored. Two bodies match only when they are structurally the same and at least `duplicate_min_statements` long (default 5). The first copy, in path and line order, is the origin. Later copies are reported at 90% with status `POSSIBLY_DUPLICATE` and a message such as `Function 'format_row' duplicates pkg/a.py:format_row`. Test modules are not compared.
+Duplicate detection hashes statement shape and constants. Names bound in the function (parameters and assignments) are ignored. Free names, including called functions such as `min` and `max`, stay in the hash. Two bodies match only when they are structurally the same and at least `duplicate_min_statements` long (default 5). The first copy, in path and line order, is the origin. Later copies are reported at 90% with status `POSSIBLY_DUPLICATE` and a message such as `Function 'format_row' duplicates pkg/a.py:format_row`. Test modules are not compared.
 
 ## Suppress a finding
 
@@ -125,7 +125,7 @@ def legacy_function():
 value = 1  # vyarth: ignore[unused-variable]
 ```
 
-A comment with no bracket suppresses every rule on that statement. A bracket lists one or more rules, separated by commas. Rule names are case-insensitive. Hyphens and underscores match, so `unused-function` is `UNUSED_FUNCTION`.
+A comment that is the only token on its line also suppresses the next line. A trailing `# vyarth: ignore` suppresses only the line it sits on. A comment with no bracket suppresses every rule on that statement. A bracket lists one or more rules, separated by commas. Rule names are case-insensitive. Hyphens and underscores match, so `unused-function` is `UNUSED_FUNCTION`.
 
 A comment on the line above a decorator, or on a decorator line, also covers the `def` or `class` it belongs to.
 

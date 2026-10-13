@@ -140,8 +140,10 @@ def _base_symbols(project: Project, config: Config) -> set[tuple[str, str]]:
         if not matched:
             continue
         for binding in index.bindings:
-            owner = binding.qualname.split(".", 1)[0]
-            if binding.qualname in matched or owner in matched:
+            if any(
+                binding.qualname == name or binding.qualname.startswith(name + ".")
+                for name in matched
+            ):
                 found.add((index.path, binding.qualname))
     return found
 

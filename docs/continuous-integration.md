@@ -76,7 +76,7 @@ A baseline file may also be a list of fingerprint strings. Each object form must
 vyarth scan . --changed --changed-from origin/main --fail-on high
 ```
 
-The project is still indexed, so a call from an unchanged file keeps a symbol alive. The report keeps findings in the Python files that differ from `origin/main`. Pair this with a committed baseline when the pull request should ignore known findings in those files too.
+The project is still indexed, so a call from an unchanged file keeps a symbol alive. The report keeps findings in the Python files that differ from the merge-base of `origin/main` and `HEAD`, so commits that landed on main after the branch point are not treated as part of the pull request. Pair this with a committed baseline when the pull request should ignore known findings in those files too.
 
 ## Confidence as a gate
 

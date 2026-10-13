@@ -18,7 +18,7 @@ def test_duration_uses_seconds_then_minutes():
 
 def test_progress_keeps_reporting_elapsed_time_during_a_slow_step():
     stream = io.StringIO()
-    progress = ScanProgress(stream, interval=0.05)
+    progress = ScanProgress(stream, interval=0.05, log_interval=0.05)
     with progress:
         progress.update("checking methods", "1/4 django/forms/fields.py")
         time.sleep(0.4)
@@ -40,6 +40,18 @@ def test_progress_rewrites_one_line_on_a_terminal():
     assert "\r" in text
     assert text.count("\n") == 1
     assert "scanned 2 files in " in text
+
+
+def test_progress_logs_label_changes_without_a_line_every_second():
+    stream = io.StringIO()
+    progress = ScanProgress(stream, interval=0.05, log_interval=30)
+    with progress:
+        progress.update("indexing files", "1/2")
+        time.sleep(0.2)
+        progress.succeed(1)
+    text = stream.getvalue()
+    assert text.count("indexing files") == 1
+    assert "scanned 1 file in " in text
 
 
 def test_a_failed_scan_does_not_claim_it_finished(tmp_path):

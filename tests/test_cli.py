@@ -78,3 +78,14 @@ def test_min_confidence_flag(tmp_path, capsys):
     rules = {finding["rule"] for finding in payload["findings"]}
     assert "UNUSED_FUNCTION" in rules
     assert "POSSIBLY_UNUSED_MODULE" not in rules
+
+
+def test_out_of_range_scan_flags_are_rejected(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as confidence:
+        main(["scan", str(path), "--min-confidence", "150"])
+    assert confidence.value.code == 2
+    with pytest.raises(SystemExit) as workers:
+        main(["scan", str(path), "--workers", "-3"])
+    assert workers.value.code == 2

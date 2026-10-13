@@ -218,6 +218,51 @@ def test_cache_markers_and_prune(tmp_path):
     assert any(item.endswith("a.py") for item in stored)
 
 
+def test_cache_keeps_findings_after_the_project_moves(tmp_path):
+    origin = tmp_path / "proj"
+    write_tree(
+        origin,
+        {
+            "app/__init__.py": "",
+            "app/service.py": "def run():\n    return 1\n\ndef spare():\n    return 2\n",
+            "main.py": (
+                "import app.service\n"
+                "\n"
+                "def main():\n"
+                "    return app.service.run()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    scan(origin)
+    moved = tmp_path / "proj2"
+    origin.rename(moved)
+    result = scan(moved)
+    spare = [item for item in result.findings if item.symbol == "spare"]
+    assert len(spare) == 1
+    assert spare[0].path == "app/service.py"
+    assert not any(item.symbol == "run" for item in result.findings)
+    stored = []
+    for path in (moved / ".vyarth" / "cache").rglob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        stored.append(payload["index"]["path"])
+    assert stored
+    assert all(str(moved) in item for item in stored)
+
+
+def test_unwritable_cache_does_not_fail_the_scan(tmp_path, monkeypatch):
+    write_tree(tmp_path, {"a.py": "def dead():\n    return 1\n"})
+
+    def deny(*_args, **_kwargs):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr("vyarth.incremental.ensure_cache_markers", deny)
+    result = scan(tmp_path)
+    assert any(item.symbol == "dead" for item in result.findings)
+
+
 def test_config_validation(tmp_path):
     (tmp_path / "vyarth.toml").write_text("typo = 1\nmin_confidence = 0\n", encoding="utf-8")
     with warnings.catch_warnings(record=True) as caught:

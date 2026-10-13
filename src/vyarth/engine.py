@@ -11,7 +11,7 @@ from vyarth.baseline import filter_baselined, load_baseline
 from vyarth.confidence import apply_confidence
 from vyarth.config import Config, load_config
 from vyarth.dependencies import dependency_findings
-from vyarth.discover import discover_files, is_test_path, project_root, relative_posix
+from vyarth.discover import discover_files, is_test_path, project_root, read_python_source, relative_posix
 from vyarth.duplicates import duplicate_findings
 from vyarth.ignore import apply_ignores
 from vyarth.incremental import cache_stamp, changed_python_files, load_cached, prune_cache, store_cached
@@ -81,7 +81,15 @@ def scan(
         progress,
     )
 
-    findings = collect_findings(indexes, root, config, check_modules=not single_file, progress=progress)
+    extra_roots = () if single_file or requested == root else (requested,)
+    findings = collect_findings(
+        indexes,
+        root,
+        config,
+        check_modules=not single_file,
+        progress=progress,
+        extra_roots=extra_roots,
+    )
     _status(progress, "checking dependencies")
     if not single_file:
         dep_findings, dep_errors = dependency_findings(indexes, root, within=requested, config=config)
@@ -128,6 +136,10 @@ def _index_files(
             stamp = cache_stamp(stat.st_size, stat.st_mtime_ns, fold, duplicate_min_statements)
             cached = load_cached(root, relpath, stamp)
             if cached is not None:
+                current = str(file)
+                if cached.path != current:
+                    cached = replace(cached, path=current)
+                    store_cached(root, relpath, stamp, cached)
                 indexes.append(cached)
                 cached_count += 1
                 _status(progress, "indexing files", _index_detail(cached_count, total, cached_count))
@@ -179,7 +191,7 @@ def _index_job(
     path, relpath, source, fold_pairs, duplicate_min_statements = job
     try:
         if source is None:
-            source = Path(path).read_text(encoding="utf-8")
+            source, _ = read_python_source(path)
         index = _backend().index_source(
             path,
             source,

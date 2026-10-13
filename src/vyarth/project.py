@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -89,9 +90,9 @@ def rebind(project: Project, indexes: list[FileIndex]) -> Project:
     )
 
 
-def build_project(indexes: list[FileIndex], root: Path) -> Project:
+def build_project(indexes: list[FileIndex], root: Path, extra_roots: Iterable[Path] = ()) -> Project:
     root = root.resolve()
-    roots = package_roots(root)
+    roots = package_roots(root, extra_roots)
     by_path = {index.path: index for index in indexes}
     module_names_by_path, package_parts_by_path = _module_maps(indexes, roots)
     bindings: dict[str, dict[str, Binding]] = {}

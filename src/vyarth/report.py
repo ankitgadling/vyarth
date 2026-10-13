@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 from vyarth.model import Finding, ScanResult
 
@@ -82,9 +83,11 @@ def render_github(result: ScanResult, root: Path | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_sarif(result: ScanResult) -> str:
+def render_sarif(result: ScanResult, root: Path | None = None) -> str:
     from vyarth import __version__
 
+    prefix = _github_prefix(root)
+    sources: dict[str, str] = {}
     rules = []
     seen: set[str] = set()
     results = []
@@ -108,8 +111,14 @@ def render_sarif(result: ScanResult) -> str:
                 "locations": [
                     {
                         "physicalLocation": {
-                            "artifactLocation": {"uri": finding.path},
-                            "region": {"startLine": finding.line, "startColumn": finding.column},
+                            "artifactLocation": {
+                                "uri": quote(f"{prefix}{finding.path}", safe="/"),
+                                "uriBaseId": "%SRCROOT%",
+                            },
+                            "region": {
+                                "startLine": finding.line,
+                                "startColumn": _sarif_column(root, finding, sources),
+                            },
                         }
                     }
                 ],
@@ -133,6 +142,40 @@ def render_sarif(result: ScanResult) -> str:
         ],
     }
     return json.dumps(document, indent=2) + "\n"
+
+
+def utf16_column(source: str, line: int, column: int) -> int:
+    """Convert an ast UTF-8 byte column to a 1-based UTF-16 code unit."""
+    if column <= 1 or line < 1:
+        return max(column, 1)
+    lines = source.splitlines()
+    if line > len(lines):
+        return column
+    raw = lines[line - 1].encode("utf-8")
+    prefix = raw[: column - 1]
+    try:
+        decoded = prefix.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = prefix.decode("utf-8", errors="ignore")
+    return len(decoded.encode("utf-16-le")) // 2 + 1
+
+
+def _sarif_column(root: Path | None, finding: Finding, sources: dict[str, str]) -> int:
+    if root is None:
+        return finding.column
+    source = sources.get(finding.path)
+    if source is None:
+        file = root / finding.path
+        try:
+            from vyarth.discover import read_python_source
+
+            source, _ = read_python_source(file)
+        except OSError:
+            source = ""
+        sources[finding.path] = source
+    if not source:
+        return finding.column
+    return utf16_column(source, finding.line, finding.column)
 
 
 def _github_prefix(root: Path | None) -> str:

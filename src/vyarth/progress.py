@@ -15,10 +15,12 @@ from typing import TextIO
 class ScanProgress:
     """Print the current step and elapsed time about once a second."""
 
-    def __init__(self, stream: TextIO | None = None, interval: float = 1.0) -> None:
+    def __init__(self, stream: TextIO | None = None, interval: float = 1.0, log_interval: float = 30.0) -> None:
         self.stream = stream
         self.interval = interval
+        self.log_interval = log_interval
         self.started = 0.0
+        self._last_log = 0.0
         self.label = "scanning"
         self.detail = ""
         self._files: int | None = None
@@ -78,9 +80,12 @@ class ScanProgress:
             with self._lock:
                 if self._stop.is_set():
                     return
+                if not self._tty and time.monotonic() - self._last_log < self.log_interval:
+                    continue
                 self._emit()
 
     def _emit(self) -> None:
+        self._last_log = time.monotonic()
         clock = format_duration(time.monotonic() - self.started)
         if self.detail:
             text = f"vyarth: {self.label} {self.detail}  {clock}"

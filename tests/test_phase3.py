@@ -1,7 +1,10 @@
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
+
+import pytest
 
 from tests.conftest import write_tree
 from vyarth import scan
@@ -165,6 +168,43 @@ def test_duplicate_bodies_are_reported(tmp_path):
     assert "no incoming imports" in finding.evidence[-1]
 
 
+def test_sarif_paths_include_the_git_prefix(tmp_path, capsys):
+    write_tree(
+        tmp_path,
+        {
+            "svc/pyproject.toml": "[project]\nname = 'svc'\nversion = '0'\n",
+            "svc/app.py": "def dead():\n    return 1\n",
+        },
+    )
+    _git(tmp_path, "init")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    assert main(["scan", str(tmp_path / "svc"), "--format", "sarif", "--quiet"]) == 1
+    sarif = json.loads(capsys.readouterr().out)
+    result = next(item for item in sarif["runs"][0]["results"] if item["ruleId"] == "UNUSED_FUNCTION")
+    location = result["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "svc/app.py"
+    assert location["uriBaseId"] == "%SRCROOT%"
+
+
+def test_changed_from_uses_the_merge_base(tmp_path):
+    from vyarth.incremental import changed_python_files
+
+    write_tree(tmp_path, {"a.py": "x = 1\n", "b.py": "y = 1\n"})
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "checkout", "-b", "feature")
+    _git(tmp_path, "checkout", "main")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "a.py")
+    _git(tmp_path, "commit", "-m", "main moves")
+    _git(tmp_path, "checkout", "feature")
+    assert changed_python_files(tmp_path, "main") == set()
+    (tmp_path / "café.py").write_text("z = 1\n", encoding="utf-8")
+    assert "café.py" in changed_python_files(tmp_path, "main")
+
+
 def test_changed_includes_files_below_the_git_root(tmp_path, capsys):
     write_tree(
         tmp_path,
@@ -295,6 +335,37 @@ def test_lsp_reads_a_content_length_message():
     raw.seek(0)
     message = _read_message(raw)
     assert message["method"] == "shutdown"
+
+
+def test_lsp_did_close_forgets_the_buffer(tmp_path):
+    from vyarth.lsp import _buffers
+
+    path = tmp_path / "app.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    uri = path.resolve().as_uri()
+    _dispatch({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "text": "y = 2\n"}}})
+    assert path.resolve() in _buffers
+    _dispatch({"method": "textDocument/didClose", "params": {"textDocument": {"uri": uri}}})
+    assert path.resolve() not in _buffers
+
+
+def test_lsp_missing_content_length_is_an_error():
+    with pytest.raises(ValueError, match="Content-Length"):
+        _read_message(io.BytesIO(b"\r\n"))
+
+
+def test_lsp_unknown_method_is_not_found():
+    response = _dispatch({"jsonrpc": "2.0", "id": 9, "method": "nope"})
+    assert response["error"]["code"] == -32601
+
+
+def test_lsp_column_is_a_utf16_code_unit(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text("def f():\n    x = 'é'; unused = 1\n    return x\n\nf()\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n", encoding="utf-8")
+    payload = diagnostics_for(path.resolve().as_uri())
+    unused = next(item for item in payload["items"] if "unused" in item["message"])
+    assert unused["range"]["start"]["character"] == 13
 
 
 def _git(root: Path, *args: str) -> None:

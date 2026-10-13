@@ -43,7 +43,7 @@ ENVIRONMENT = "production"
 | `report_dev_dependencies` | `false` | Report development and docs dependencies. They score 70. |
 | `fold` | none | Names folded to constants. Values are strings, numbers, or booleans. |
 
-A command-line flag overrides the matching config key for that run: `--min-confidence`, `--baseline`, `--fail-on`, `--workers`, and `--define`.
+A command-line flag overrides the matching config key for that run: `--min-confidence`, `--baseline`, `--fail-on`, `--workers`, and `--define`. `--min-confidence` must be from 0 to 100 and `--workers` must be zero or positive. A value outside that range exits 2.
 
 Invalid values fail the scan with exit code 2. `min_confidence`, `workers`, and `duplicate_min_statements` must be integers. `min_confidence` must be from 0 to 100. `duplicate_min_statements` must be at least 1. `workers` must be zero or positive. `fail_on` must be `high`, `medium`, or `low`. `report_dev_dependencies` must be a boolean. `frameworks` must be names from `django`, `pydantic`, and `celery`. List options must be strings or arrays of strings. `fold` must be a table. A key Vyarth does not recognize prints a warning and does not fail the scan.
 
@@ -84,7 +84,7 @@ setup.py
 - `pydantic` treats `validator`, `field_validator`, `model_validator`, `computed_field`, `field_serializer`, and `model_serializer` as entry decorators.
 - `celery` already counts `task` and `shared_task`. It also treats a module-level `beat_schedule` as used.
 
-`ignore_names` drops a finding when the symbol matches a pattern. `ignore_bases` treats a class with that base as used. Its methods and attributes are not reported as unused. `vyarth baseline` is still the fingerprint list. There is no separate whitelist command.
+`ignore_names` drops a finding when the symbol matches a pattern. `ignore_bases` treats a class with that base as used. Its methods and attributes are not reported as unused, including methods of a class nested inside a function. `vyarth baseline` is still the fingerprint list. There is no separate whitelist command.
 
 ## Constant folding
 
@@ -102,4 +102,4 @@ vyarth scan . --define ENVIRONMENT=production --define DEBUG=false
 
 ## Cache
 
-Directory scans store one JSON record per file under `.vyarth/cache`. The key includes the Vyarth version, the index version, path, size, modification time, the fold map, and the duplicate-statement minimum. The first write creates `.vyarth/.gitignore` containing `*` and a `CACHEDIR.TAG`. After a scan of the project root, cache files whose stored path was not indexed are deleted. A subdirectory scan and a language-server overlay do not prune the cache. `--no-cache` reparses every file. A single-file scan does not use the cache. Overlay text from the language server is not cached.
+Directory scans store one JSON record per file under `.vyarth/cache`. The key includes the Vyarth version, the index version, the relative path, size, modification time, the fold map, and the duplicate-statement minimum. On a cache hit the stored absolute path is replaced with the file being scanned, so moving the project does not reuse a stale location. The first write creates `.vyarth/.gitignore` containing `*` and a `CACHEDIR.TAG`. A cache write that the filesystem rejects is skipped; the scan still finishes. After a scan of the project root, cache files whose stored path was not indexed are deleted. A subdirectory scan and a language-server overlay do not prune the cache. `--no-cache` reparses every file. A single-file scan does not use the cache. Overlay text from the language server is not cached.
