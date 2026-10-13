@@ -34,7 +34,7 @@ def changed_python_files(root: Path, ref: str = "HEAD") -> set[str]:
     Raises RuntimeError when git cannot answer.
     """
     prefix = _git_prefix(root)
-    base = _git_output(root, ["git", "merge-base", ref, "HEAD"]).strip() or ref
+    base = _merge_base(root, ref)
     diff_paths = _git_lines(
         root,
         ["git", "-c", "core.quotePath=false", "diff", "--name-only", base],
@@ -167,6 +167,19 @@ def _git_lines(root: Path, args: list[str]) -> list[str]:
         for line in _git_output(root, args).splitlines()
         if line.strip()
     ]
+
+
+def _merge_base(root: Path, ref: str) -> str:
+    """Commit to diff against. A failed merge-base falls back to `ref`.
+
+    Shallow clones and unrelated histories make `git merge-base` exit non-zero.
+    Diffing against `ref` itself still lists the files that changed.
+    """
+    try:
+        found = _git_output(root, ["git", "merge-base", ref, "HEAD"]).strip()
+    except RuntimeError:
+        return ref
+    return found or ref
 
 
 def _git_output(root: Path, args: list[str]) -> str:

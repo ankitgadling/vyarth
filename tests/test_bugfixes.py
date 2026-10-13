@@ -1255,6 +1255,117 @@ def test_external_base_methods_score_60(tmp_path):
     assert findings["close"].confidence == 96
 
 
+def test_builtin_alias_and_call_bases_score_60(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "main.py": (
+                "from typing import Generic, TypeVar\n"
+                "\n"
+                "T = TypeVar('T')\n"
+                "Base = dict\n"
+                "\n"
+                "def with_metaclass(meta):\n"
+                "    return meta\n"
+                "\n"
+                "class Bag(dict):\n"
+                "    def missing(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Problem(Exception):\n"
+                "    def explain(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Model(Base):\n"
+                "    def save(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Box(Generic[T]):\n"
+                "    def pack(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Built(with_metaclass(type)):\n"
+                "    def seal(self):\n"
+                "        return 1\n"
+                "\n"
+                "def main():\n"
+                "    Bag()\n"
+                "    Problem()\n"
+                "    Model()\n"
+                "    Box()\n"
+                "    Built()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_FUNCTION"}
+    for name in ("missing", "explain", "save", "pack", "seal"):
+        assert findings[name].confidence == 60
+        assert "external base" in findings[name].evidence[-1]
+
+
+def test_project_class_bases_stay_96(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/base.py": (
+                "class Parent:\n"
+                "    def hook(self):\n"
+                "        return 1\n"
+            ),
+            "pkg/child.py": (
+                "from typing import Generic, TypeVar\n"
+                "from pkg.base import Parent\n"
+                "\n"
+                "T = TypeVar('T')\n"
+                "\n"
+                "class Local:\n"
+                "    def keep(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Direct(Local):\n"
+                "    def extra(self):\n"
+                "        return 2\n"
+                "\n"
+                "class Imported(Parent):\n"
+                "    def other(self):\n"
+                "        return 3\n"
+                "\n"
+                "class Box(Generic[T]):\n"
+                "    def pack(self):\n"
+                "        return 4\n"
+                "\n"
+                "class Sub(Box[int]):\n"
+                "    def seal(self):\n"
+                "        return 5\n"
+            ),
+            "main.py": (
+                "import pkg.child\n"
+                "\n"
+                "def main():\n"
+                "    pkg.child.Local()\n"
+                "    pkg.child.Direct()\n"
+                "    pkg.child.Parent()\n"
+                "    pkg.child.Imported()\n"
+                "    pkg.child.Box()\n"
+                "    pkg.child.Sub()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_FUNCTION"}
+    assert findings["extra"].confidence == 96
+    assert findings["other"].confidence == 96
+    assert findings["seal"].confidence == 96
+    assert findings["keep"].confidence == 96
+    assert findings["pack"].confidence == 60
+
+
 def test_duplicate_hash_keeps_free_names(tmp_path):
     write_tree(
         tmp_path,
@@ -1320,6 +1431,44 @@ def test_namespace_distributions_are_not_all_marked_used(tmp_path, monkeypatch):
     findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
     assert findings["google-cloud-storage"].confidence == 70
     assert findings["protobuf"].confidence == 70
+
+
+def test_dotted_import_uses_the_distribution_that_provides_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_map",
+        lambda: {"google": ["google-cloud-storage", "protobuf"]},
+    )
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_provides",
+        lambda name, module: name == "protobuf" and module == "google.protobuf",
+    )
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                "[project]\n"
+                "name = 'app'\n"
+                "version = '0.1'\n"
+                "dependencies = ['google-cloud-storage', 'protobuf']\n"
+            ),
+            "main.py": "import google.protobuf\ngoogle.protobuf\n",
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert "protobuf" not in findings
+    assert findings["google-cloud-storage"].confidence == 70
+
+
+def test_requirements_bom_does_not_hide_the_first_package(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_map",
+        lambda: {"requests": ["requests"]},
+    )
+    (tmp_path / "requirements.txt").write_bytes(b"\xef\xbb\xbfrequests\nclick\n")
+    (tmp_path / "main.py").write_text("if __name__ == '__main__':\n    print(1)\n", encoding="utf-8")
+    findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert findings["requests"].confidence == 95
+    assert findings["click"].confidence == 70
 
 
 def test_bom_and_coding_cookie_files_are_indexed(tmp_path):
@@ -1392,6 +1541,46 @@ def test_nested_directory_is_its_own_package_root(tmp_path):
     assert len(spare) == 1
     assert spare[0].path.endswith("app/service.py")
     assert not any(item.symbol == "run" for item in result.findings)
+
+
+def test_scanning_a_package_directory_keeps_its_name(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'repo'\nversion = '0.1'\n",
+            "mypkg/__init__.py": (
+                "from .service import run\n"
+                "from .sub import child\n"
+                "\n"
+                "def main():\n"
+                "    return run() + child()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+            "mypkg/service.py": "def run():\n    return 1\n\ndef spare():\n    return 2\n",
+            "mypkg/sub/__init__.py": "from ..service import run\n\ndef child():\n    return run()\n",
+            "mypkg/logging.py": "def note():\n    return 1\n",
+            "src/mypkg/__init__.py": (
+                "from .service import run\n"
+                "from .sub import child\n"
+                "\n"
+                "def main():\n"
+                "    return run() + child()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+            "src/mypkg/service.py": "def run():\n    return 1\n\ndef spare():\n    return 2\n",
+            "src/mypkg/sub/__init__.py": "from ..service import run\n\ndef child():\n    return run()\n",
+            "src/mypkg/logging.py": "def note():\n    return 1\n",
+        },
+    )
+    for folder in (tmp_path / "mypkg", tmp_path / "src" / "mypkg"):
+        symbols = {item.symbol for item in scan(folder).findings}
+        assert "spare" in symbols
+        assert "note" in symbols
+        assert "run" not in symbols
 
 
 def test_comprehension_fingerprint_stays_when_a_function_is_inserted(tmp_path):

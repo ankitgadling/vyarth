@@ -56,6 +56,39 @@ def collect_ignores(source: str) -> tuple[IgnoreDirective, ...]:
     return tuple(directives)
 
 
+def expand_import_ignores(tree: ast.AST, directives: tuple[IgnoreDirective, ...]) -> tuple[IgnoreDirective, ...]:
+    """Copy a statement-level import ignore onto each imported name.
+
+    `from x import (  # vyarth: ignore` and a comment on the closing line belong
+    to the whole statement. A trailing comment on one name stays on that line.
+    """
+    if not directives:
+        return directives
+    extra: list[IgnoreDirective] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import | ast.ImportFrom):
+            continue
+        start = node.lineno
+        end = node.end_lineno or start
+        if end <= start:
+            continue
+        positions: list[int] = []
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            line = alias.lineno if isinstance(alias.lineno, int) else start
+            positions.append(line)
+        alias_lines = set(positions)
+        for item in directives:
+            if not item.exact or not start <= item.line <= end or item.line in alias_lines:
+                continue
+            for line in positions:
+                extra.append(IgnoreDirective(line=line, rules=item.rules, exact=True))
+    if not extra:
+        return directives
+    return directives + tuple(extra)
+
+
 def import_noqa_ignores(tree: ast.AST, source: str) -> tuple[IgnoreDirective, ...]:
     """`# noqa` and `# noqa: F401` suppress unused imports on that statement.
 
@@ -117,8 +150,18 @@ def expand_decorator_ignores(tree: ast.AST, directives: tuple[IgnoreDirective, .
         for first, statement_line in anchors:
             on_decorator = first <= directive.line < statement_line
             directly_above = directive.line + 1 == first
+            # A trailing comment belongs to its own line. It must not jump
+            # from the statement above a decorator onto the def.
+            if directive.exact and directive.line < first:
+                continue
             if on_decorator or directly_above:
-                extra.append(IgnoreDirective(line=statement_line, rules=directive.rules))
+                extra.append(
+                    IgnoreDirective(
+                        line=statement_line,
+                        rules=directive.rules,
+                        exact=directive.exact,
+                    )
+                )
     if not extra:
         return directives
     return directives + tuple(extra)

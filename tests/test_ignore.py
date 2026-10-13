@@ -114,3 +114,46 @@ def test_trailing_ignore_does_not_hide_the_next_line(tmp_path):
     symbols = {finding.symbol for finding in scan(path).findings if finding.rule == "UNUSED_IMPORT"}
     assert "os" not in symbols
     assert "sys" in symbols
+
+
+def test_trailing_ignore_above_a_decorator_does_not_hide_the_function(tmp_path):
+    path = tmp_path / "mod.py"
+    path.write_text(
+        "def deco(fn):\n"
+        "    return fn\n"
+        "\n"
+        "import os  # vyarth: ignore\n"
+        "@deco\n"
+        "def unused():\n"
+        "    return 1\n"
+        "\n"
+        "@deco  # vyarth: ignore\n"
+        "def hidden():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    symbols = {finding.symbol for finding in scan(path).findings}
+    assert "os" not in symbols
+    assert "unused" in symbols
+    assert "hidden" not in symbols
+
+
+def test_ignore_on_a_parenthesized_import_covers_every_name(tmp_path):
+    path = tmp_path / "mod.py"
+    path.write_text(
+        "from json import (  # vyarth: ignore\n"
+        "    dumps,\n"
+        "    loads,\n"
+        ")\n"
+        "import sys\n"
+        "from os import (\n"
+        "    path,  # vyarth: ignore\n"
+        "    getcwd,\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    symbols = {finding.symbol for finding in scan(path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert symbols.isdisjoint({"dumps", "loads"})
+    assert "path" not in symbols
+    assert "getcwd" in symbols
+    assert "sys" in symbols

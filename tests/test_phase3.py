@@ -205,6 +205,25 @@ def test_changed_from_uses_the_merge_base(tmp_path):
     assert "café.py" in changed_python_files(tmp_path, "main")
 
 
+def test_changed_from_falls_back_when_histories_are_unrelated(tmp_path):
+    from vyarth.incremental import changed_python_files
+
+    repo = tmp_path / "repo"
+    other = tmp_path / "other"
+    write_tree(repo, {"a.py": "x = 1\n"})
+    write_tree(other, {"b.py": "y = 1\n"})
+    _git(repo, "init", "-b", "main")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(other, "init", "-b", "feature")
+    _git(other, "add", ".")
+    _git(other, "commit", "-m", "other")
+    _git(repo, "remote", "add", "other", str(other))
+    _git(repo, "fetch", "other")
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    assert "a.py" in changed_python_files(repo, "other/feature")
+
+
 def test_changed_includes_files_below_the_git_root(tmp_path, capsys):
     write_tree(
         tmp_path,

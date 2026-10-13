@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 
 from vyarth.backend import AnalysisBackend
-from vyarth.ignore import collect_ignores, expand_decorator_ignores, import_noqa_ignores
+from vyarth.ignore import collect_ignores, expand_decorator_ignores, expand_import_ignores, import_noqa_ignores
 from vyarth.model import (
     BodyHash,
     CallEdge,
@@ -63,6 +63,20 @@ from vyarth._index_walk import (
 )
 
 
+def _base_expression(node: ast.expr) -> str:
+    """Name of a class base, unwrapping subscripts and calls.
+
+    `Generic[T]` and `with_metaclass(Meta)` still name a base. An expression
+    with no name is `@external`, so the class is not treated as having no base.
+    """
+    current = node
+    while isinstance(current, ast.Subscript):
+        current = current.value
+    if isinstance(current, ast.Call):
+        current = current.func
+    return _dotted_name(current) or "@external"
+
+
 class _Indexer(ast.NodeVisitor):
     def __init__(
         self,
@@ -118,6 +132,7 @@ class _Indexer(ast.NodeVisitor):
         finally:
             _FOLD.reset(token)
         ignores = expand_decorator_ignores(tree, collect_ignores(self.source))
+        ignores = expand_import_ignores(tree, ignores)
         ignores = ignores + import_noqa_ignores(tree, self.source)
         return FileIndex(
             path=self.path,
@@ -153,8 +168,8 @@ class _Indexer(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         qualname = _qualname(self.scope, node.name)
         self._record_decorators(qualname, node.decorator_list)
-        base_names = tuple(name for base in node.bases if (name := _dotted_name(base)))
-        if base_names:
+        if node.bases:
+            base_names = tuple(_base_expression(base) for base in node.bases)
             self.pending_bases.append((qualname, self.scope, base_names))
         for decorator in node.decorator_list:
             self.visit(decorator)
@@ -748,15 +763,16 @@ class _Indexer(ast.NodeVisitor):
         return tuple(found)
 
     def _resolve_base_name(self, scope: _Scope, dotted: str) -> str:
+        if dotted == "@external":
+            return "@external"
         if "." not in dotted:
             binding = _resolve(scope, dotted, self.module)
-            if binding is None:
-                return ""
-            if binding.kind == "class":
+            if binding is not None and binding.kind == "class":
                 return binding.qualname
-            if binding.kind == "import":
+            if binding is not None and binding.kind == "import":
                 return f"@import:{binding.qualname}"
-            return ""
+            # A builtin, an alias, or any other non-class name is not a project base.
+            return dotted
         return f"@expr:{dotted}"
 
     def _resolve_calls(self) -> list[CallEdge]:

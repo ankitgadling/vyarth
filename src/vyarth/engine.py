@@ -81,7 +81,11 @@ def scan(
         progress,
     )
 
-    extra_roots = () if single_file or requested == root else (requested,)
+    # A nested folder that is not a package becomes a root, so `scan examples/app`
+    # resolves `import app`. A directory with `__init__.py` keeps its own name.
+    extra_roots: tuple[Path, ...] = ()
+    if not single_file and requested != root and not (requested / "__init__.py").is_file():
+        extra_roots = (requested,)
     findings = collect_findings(
         indexes,
         root,

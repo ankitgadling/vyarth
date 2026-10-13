@@ -176,14 +176,43 @@ _DISTRIBUTIONS: dict[str, list[str]] | None = None
 
 
 def _used_distributions(modules: set[str]) -> set[str]:
-    mapping = _distribution_map()
     found: set[str] = set()
     for module in modules:
-        dists = mapping.get(_top_level(module), ())
+        dists = _module_distributions(module)
         if len(dists) != 1:
             continue
-        found.add(_canonical(str(dists[0])))
+        found.add(_canonical(dists[0]))
     return found
+
+
+def _module_distributions(module: str) -> list[str]:
+    """Distributions that provide `module`.
+
+    A top-level shared by several distributions, such as `google`, is not enough
+    to mark every one of them used. A dotted import such as `google.protobuf`
+    counts only for the distribution whose installed files contain that module.
+    """
+    candidates = [str(item) for item in _distribution_map().get(_top_level(module), ())]
+    if len(candidates) <= 1 or "." not in module:
+        return candidates
+    matched = [name for name in candidates if _distribution_provides(name, module)]
+    return matched or candidates
+
+
+def _distribution_provides(dist_name: str, module: str) -> bool:
+    """True when the installed distribution contains `module`."""
+    try:
+        from importlib.metadata import distribution
+
+        dist = distribution(dist_name)
+    except Exception:
+        return False
+    prefix = module.replace(".", "/")
+    for file in dist.files or ():
+        text = str(file).replace("\\", "/")
+        if text == f"{prefix}.py" or text.startswith(f"{prefix}/"):
+            return True
+    return False
 
 
 def _shared_namespace(name: str, modules: set[str]) -> bool:
@@ -294,7 +323,7 @@ def _read_manifest(path: Path, root: Path) -> tuple[list[tuple[str, int, bool]],
 
 def _requirements(path: Path) -> list[tuple[str, int]]:
     packages: list[tuple[str, int]] = []
-    for line_number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         text = raw.split("#", 1)[0].strip()
         if not text or text.startswith(("-r", "-c", "-e", "--", "git+", "http://", "https://")):
             continue
@@ -325,7 +354,7 @@ def _tag(packages: list[tuple[str, int]], dev: bool) -> list[tuple[str, int, boo
 def _pyproject(path: Path) -> list[tuple[str, int, bool]]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
     packages: list[tuple[str, int, bool]] = []
     project = data.get("project", {})
     if isinstance(project, dict):
@@ -357,7 +386,7 @@ def _pyproject(path: Path) -> list[tuple[str, int, bool]]:
 def _pipfile(path: Path) -> list[tuple[str, int, bool]]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
     packages: list[tuple[str, int, bool]] = []
     packages.extend(_tag(_toml_keys(data.get("packages"), lines), False))
     packages.extend(_tag(_toml_keys(data.get("dev-packages"), lines), True))

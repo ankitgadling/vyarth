@@ -45,7 +45,7 @@ The built-in decorator hooks, matched on the final attribute, are `route`, `get`
 
 ## Reachability
 
-From each entry module, Vyarth follows imports. A relative import is resolved against the importing file. In a project that contains `src/`, a file is reachable under both the src-layout name (`account.cache`) and the path from the project root (`src.account.cache`). A directory scan of a nested folder also treats that folder as a package root, so `vyarth scan examples/app` resolves `import app.service` when `examples/app/app/service.py` exists.
+From each entry module, Vyarth follows imports. A relative import is resolved against the importing file. In a project that contains `src/`, a file is reachable under both the src-layout name (`account.cache`) and the path from the project root (`src.account.cache`). A directory scan of a nested folder that is not itself a package also treats that folder as a package root, so `vyarth scan examples/app` resolves `import app.service` when `examples/app/app/service.py` exists. Scanning a package directory, one that contains `__init__.py`, keeps that package's name, so `vyarth scan src/mypkg` still sees `mypkg`.
 
 A module that no entry can import is `POSSIBLY_UNUSED_MODULE`. Modules that import only each other are both unused, because nothing outside the cycle starts the walk.
 
