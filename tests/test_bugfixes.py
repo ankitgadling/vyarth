@@ -1100,7 +1100,11 @@ def test_annotated_keeps_only_its_first_argument(tmp_path):
     assert "Fraction" in unused
 
 
-def test_dev_optional_extra_scores_70(tmp_path):
+def test_dev_optional_extra_scores_70(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "vyarth.dependencies._distribution_map",
+        lambda: {"click": ["click"]},
+    )
     write_tree(
         tmp_path,
         {
