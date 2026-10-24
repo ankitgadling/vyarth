@@ -7,12 +7,13 @@ def test_unused_module_caps_a_function(tmp_path):
         tmp_path,
         {
             "main.py": "if __name__ == '__main__':\n    print(1)\n",
-            "lone.py": "def helper():\n    return 1\n",
+            "lone.py": "def helper():\n    return 1\n\ndef _helper():\n    return 2\n",
         },
     )
-    finding = next(item for item in scan(tmp_path).findings if item.symbol == "helper")
-    assert finding.confidence == 82
-    assert "no incoming imports" in finding.evidence[-1]
+    findings = {item.symbol: item for item in scan(tmp_path).findings}
+    assert findings["helper"].confidence == 60
+    assert findings["_helper"].confidence == 82
+    assert "no incoming imports" in findings["_helper"].evidence[-1]
 
 
 def test_dynamic_import_caps_a_function_with_the_module(tmp_path):
@@ -32,16 +33,18 @@ def test_reached_module_keeps_a_high_function_score(tmp_path):
     write_tree(
         tmp_path,
         {
-            "live.py": "def helper():\n    return 1\n",
+            "live.py": "def helper():\n    return 1\n\ndef _helper():\n    return 2\n",
             "main.py": "import live\nif __name__ == '__main__':\n    print(live)\n",
         },
     )
-    finding = next(item for item in scan(tmp_path).findings if item.symbol == "helper")
-    assert finding.confidence == 96
-    assert "no incoming imports" not in " ".join(finding.evidence)
+    findings = {item.symbol: item for item in scan(tmp_path).findings}
+    assert findings["helper"].confidence == 60
+    assert "Public name" in findings["helper"].evidence[-1]
+    assert findings["_helper"].confidence == 96
+    assert "no incoming imports" not in " ".join(findings["_helper"].evidence)
 
 
-def test_duplicate_in_a_reached_module_stays_at_90(tmp_path):
+def test_duplicate_in_a_reached_module_stays_below_the_high_gate(tmp_path):
     body = (
         "    item = value\n"
         "    item = item + 1\n"
@@ -66,7 +69,7 @@ def test_duplicate_in_a_reached_module_stays_at_90(tmp_path):
         },
     )
     finding = next(item for item in scan(tmp_path).findings if item.rule == "DUPLICATE_CODE")
-    assert finding.confidence == 90
+    assert finding.confidence == 80
     assert finding.evidence == ("pkg/a.py:save_a",)
 
 
@@ -93,7 +96,7 @@ def test_alembic_names_score_70_and_stay_reported(tmp_path):
     )
     findings = [item for item in scan(tmp_path).findings if item.symbol == "upgrade"]
     assert len(findings) == 1
-    assert findings[0].confidence == 70
+    assert findings[0].confidence == 60
     assert "Alembic loads this name" in findings[0].evidence[-1]
 
 

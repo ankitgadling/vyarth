@@ -68,7 +68,7 @@ def test_min_confidence_flag(tmp_path, capsys):
         tmp_path,
         {
             "pkg/__init__.py": "from . import live\nlive\n",
-            "pkg/live.py": "def unused():\n    return 1\n",
+            "pkg/live.py": "def _unused():\n    return 1\n",
             "pkg/orphan.py": "x = 1\n",
             "main.py": "import pkg\nif __name__ == '__main__':\n    print(pkg)\n",
         },

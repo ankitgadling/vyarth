@@ -142,5 +142,5 @@ def test_method_local_helper_is_reported(tmp_path):
     assert ("UNUSED_FUNCTION", "helper") in found
     method = next(finding for finding in findings if finding.symbol == "method")
     assert method.rule == "UNUSED_FUNCTION"
-    assert method.confidence == 96
+    assert method.confidence == 60
     assert "A" not in {symbol for _, symbol in found}

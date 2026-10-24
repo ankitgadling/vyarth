@@ -419,6 +419,9 @@ def test_unreferenced_method_and_class_attribute_score_96(tmp_path):
                 "    def close(self):\n"
                 "        return 1\n"
                 "\n"
+                "    def _close(self):\n"
+                "        return 1\n"
+                "\n"
                 "def main():\n"
                 "    Box()\n"
                 "\n"
@@ -429,11 +432,12 @@ def test_unreferenced_method_and_class_attribute_score_96(tmp_path):
     )
     findings = {finding.symbol: finding for finding in scan(tmp_path).findings}
     assert findings["close"].rule == "UNUSED_FUNCTION"
-    assert findings["close"].confidence == 96
+    assert findings["close"].confidence == 60
+    assert findings["_close"].confidence == 96
     assert findings["quiet"].rule == "UNUSED_FUNCTION"
-    assert findings["quiet"].confidence == 96
+    assert findings["quiet"].confidence == 60
     assert findings["LIMIT"].rule == "UNUSED_VARIABLE"
-    assert findings["LIMIT"].confidence == 96
+    assert findings["LIMIT"].confidence == 60
     assert "label" not in findings
 
 
@@ -489,7 +493,7 @@ def test_referenced_method_outside_the_entry_stays_an_orphan(tmp_path):
     )
     findings = {finding.symbol: finding for finding in scan(tmp_path).findings}
     assert findings["unused"].rule == "UNUSED_FUNCTION"
-    assert findings["unused"].confidence == 96
+    assert findings["unused"].confidence == 60
     assert findings["close"].rule == "ORPHAN_FUNCTION"
     assert findings["close"].confidence == 80
 
@@ -1050,6 +1054,42 @@ def test_node_visitor_methods_are_reached(tmp_path):
     assert ("UNUSED_FUNCTION", "visit_page") in found
 
 
+def test_root_scan_skips_nested_example_requirements(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'app'\nversion = '0.1'\n",
+            "requirements.txt": "root-only-pkg\n",
+            "examples/celery/requirements.txt": "amqp\nkombu\n",
+            "docs/requirements.txt": "sphinx\n",
+            "main.py": "if __name__ == '__main__':\n    print(1)\n",
+        },
+    )
+    root_symbols = {item.symbol for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert "root-only-pkg" in root_symbols
+    assert "amqp" not in root_symbols
+    assert "kombu" not in root_symbols
+    assert "sphinx" not in root_symbols
+
+    from vyarth.config import Config
+
+    reported = {
+        item.symbol
+        for item in scan(tmp_path, config=Config(report_dev_dependencies=True)).findings
+        if item.rule == "UNUSED_DEPENDENCY"
+    }
+    assert "sphinx" in reported
+    assert "amqp" not in reported
+
+    example = {
+        item.symbol
+        for item in scan(tmp_path / "examples" / "celery").findings
+        if item.rule == "UNUSED_DEPENDENCY"
+    }
+    assert {"amqp", "kombu", "root-only-pkg"} <= example
+    assert "sphinx" not in example
+
+
 def test_subdirectory_scan_ignores_manifests_outside_it(tmp_path):
     write_tree(
         tmp_path,
@@ -1238,6 +1278,9 @@ def test_external_base_methods_score_60(tmp_path):
                 "    def close(self):\n"
                 "        return 1\n"
                 "\n"
+                "    def _shut(self):\n"
+                "        return 1\n"
+                "\n"
                 "def main():\n"
                 "    Enc()\n"
                 "    Worker()\n"
@@ -1252,7 +1295,9 @@ def test_external_base_methods_score_60(tmp_path):
     assert findings["default"].confidence == 60
     assert "external base" in findings["default"].evidence[-1]
     assert findings["run"].confidence == 60
-    assert findings["close"].confidence == 96
+    assert findings["close"].confidence == 60
+    assert "Public name" in findings["close"].evidence[-1]
+    assert findings["_shut"].confidence == 96
 
 
 def test_builtin_alias_and_call_bases_score_60(tmp_path):
@@ -1326,6 +1371,9 @@ def test_project_class_bases_stay_96(tmp_path):
                 "    def keep(self):\n"
                 "        return 1\n"
                 "\n"
+                "    def _keep(self):\n"
+                "        return 1\n"
+                "\n"
                 "class Direct(Local):\n"
                 "    def extra(self):\n"
                 "        return 2\n"
@@ -1359,10 +1407,11 @@ def test_project_class_bases_stay_96(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_FUNCTION"}
-    assert findings["extra"].confidence == 96
-    assert findings["other"].confidence == 96
-    assert findings["seal"].confidence == 96
-    assert findings["keep"].confidence == 96
+    assert findings["extra"].confidence == 60
+    assert findings["other"].confidence == 60
+    assert findings["seal"].confidence == 60
+    assert findings["keep"].confidence == 60
+    assert findings["_keep"].confidence == 96
     assert findings["pack"].confidence == 60
 
 

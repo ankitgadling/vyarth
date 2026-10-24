@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Scores a public unused function, class, method, attribute, or module-level variable at 60%. A private name stays at 96%, or 100% for a private module-level variable. `--fail-on high` no longer fails on a library's public surface.
+- Scores duplicate function bodies at 80%, so they stay out of `--fail-on high`.
+- A scan of the project root no longer treats manifests under `examples/`, `tutorial/`, `samples/`, `demo/`, or `benchmarks/` as project dependencies. Nested package manifests still count. Scanning that directory reports its own manifest.
 - Counts `from module import Name as Name` as a public re-export, follows an attribute on an imported submodule, and reads a quoted name inside `Union`, `Optional`, the first argument of `Annotated`, and a `|` expression.
 - Skips members of `Enum`, `IntEnum`, `StrEnum`, `Flag`, and `IntFlag`. Methods on those classes are still reported.
 - Walks `@property` and `@cached_property` bodies on a used class, follows a typed cross-module call, and reaches an override of a reached method.

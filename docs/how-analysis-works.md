@@ -71,9 +71,10 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 
 | Situation | Score |
 | --- | --- |
-| Module-level function or class with no references | 96 |
-| Unreferenced method on a used class | 96, or 60 when the class has a base outside the project |
-| Unreferenced attribute on a used class | 96 |
+| Private module-level function or class with no references | 96 |
+| Public module-level function, class, or variable with no references | 60 |
+| Unreferenced method on a used class | 96 when the name is private, or 60 when it is public or the class has a base outside the project |
+| Unreferenced attribute on a used class | 96 when the name is private, or 60 when it is public |
 | Decorated, and the decorator is not an entry | 75 |
 | The name appears as a string in `getattr`, `setattr`, `eval`, or `exec` | 70 |
 | The file calls `importlib` or `__import__` | unused imports in that file drop to 70 |
@@ -81,7 +82,7 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Unused dotted `import pkg.sub` | 70, because the import may run the submodule for its side effects |
 | Any file in the project imports dynamically | unused modules drop to 60 |
 | Referenced, but no entry reaches the reference | 80, or 60 if an unresolved attribute call uses the name |
-| Duplicate body | 90 |
+| Duplicate body | 80 |
 
 Findings in an unused module, other than unreachable code, are capped at the module’s score. A `DEAD` finding that this cap, or the Alembic adjustment, lowers below 100 becomes `POSSIBLY_DEAD`.
 

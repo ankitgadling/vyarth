@@ -10,6 +10,13 @@ from typing import Any
 # The scan cache mixes this into its stamp so old records are not reused.
 INDEX_VERSION = 11
 
+PUBLIC_NAME_NOTE = "Public name. Callers outside this project may still load it."
+
+
+def is_private_name(name: str) -> bool:
+    """True when the name is not part of the importable public surface."""
+    return name.startswith("_")
+
 
 def make_fingerprint(rule: str, path: str, qualname: str) -> str:
     """Stable id for a finding. Line numbers are omitted so later baselines survive edits."""

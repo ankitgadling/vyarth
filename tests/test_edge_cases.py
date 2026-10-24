@@ -22,10 +22,10 @@ def test_dead_branch_call_is_unused_not_orphan(tmp_path):
         tmp_path,
         {
             "app.py": (
-                "def dead():\n"
+                "def _dead():\n"
                 "    return 1\n"
                 "\n"
-                "def folded():\n"
+                "def _folded():\n"
                 "    return 2\n"
                 "\n"
                 "def live():\n"
@@ -33,11 +33,11 @@ def test_dead_branch_call_is_unused_not_orphan(tmp_path):
                 "\n"
                 "def main():\n"
                 "    if False:\n"
-                "        dead()\n"
+                "        _dead()\n"
                 "    if COUNT == 1:\n"
                 "        live()\n"
                 "    else:\n"
-                "        folded()\n"
+                "        _folded()\n"
                 "\n"
                 "if __name__ == '__main__':\n"
                 "    main()\n"
@@ -45,7 +45,7 @@ def test_dead_branch_call_is_unused_not_orphan(tmp_path):
         },
     )
     result = scan(tmp_path, defines={"COUNT": "1"})
-    for symbol in ("dead", "folded"):
+    for symbol in ("_dead", "_folded"):
         found = _named(result, symbol)
         assert len(found) == 1
         assert found[0].rule == "UNUSED_FUNCTION"
@@ -118,14 +118,14 @@ def test_uncalled_lambda_does_not_reach_callee(tmp_path):
         tmp_path,
         {
             "app.py": (
-                "def unused():\n"
+                "def _unused():\n"
                 "    return 1\n"
                 "\n"
                 "def used():\n"
                 "    return 2\n"
                 "\n"
                 "def main():\n"
-                "    handler = lambda: unused()\n"
+                "    handler = lambda: _unused()\n"
                 "    return 1\n"
                 "\n"
                 "def entry():\n"
@@ -138,7 +138,7 @@ def test_uncalled_lambda_does_not_reach_callee(tmp_path):
         },
     )
     result = scan(tmp_path)
-    unused = _named(result, "unused")
+    unused = _named(result, "_unused")
     assert len(unused) == 1
     assert unused[0].rule == "UNUSED_FUNCTION"
     assert unused[0].confidence >= 96
@@ -199,7 +199,8 @@ def test_file_getattr_keeps_unrelated_dead_functions(tmp_path):
         found = _named(result, symbol)
         assert len(found) == 1
         assert found[0].rule == "UNUSED_FUNCTION"
-        assert found[0].confidence == 96
+        assert found[0].confidence == 60
+        assert "Dynamic usage" not in " ".join(found[0].evidence)
 
 
 def test_literal_getattr_lowers_only_the_named_symbol(tmp_path):
@@ -249,7 +250,8 @@ def test_literal_getattr_lowers_only_the_named_symbol(tmp_path):
     assert run[0].confidence <= 70
     assert len(limit) == 1
     assert limit[0].rule == "UNUSED_VARIABLE"
-    assert limit[0].confidence == 96
+    assert limit[0].confidence == 60
+    assert "Dynamic usage" not in " ".join(limit[0].evidence)
 
     limit_only = scan(tmp_path / "limit_only")
     lowered = _named(limit_only, "LIMIT")
@@ -257,7 +259,8 @@ def test_literal_getattr_lowers_only_the_named_symbol(tmp_path):
     assert len(lowered) == 1
     assert lowered[0].confidence <= 70
     assert len(kept) == 1
-    assert kept[0].confidence == 96
+    assert kept[0].confidence == 60
+    assert "Dynamic usage" not in " ".join(kept[0].evidence)
 
 
 def test_nested_eval_and_decorator_are_not_deleted(tmp_path):
@@ -349,7 +352,7 @@ def test_basemodel_fields_stay_quiet(tmp_path):
     limit = _named(result, "limit")
     assert len(limit) == 1
     assert limit[0].rule == "UNUSED_VARIABLE"
-    assert limit[0].confidence == 96
+    assert limit[0].confidence == 60
 
 
 def test_alias_call_uses_the_assignment_in_force(tmp_path):
@@ -582,16 +585,16 @@ def test_inner_call_on_a_later_dead_line_is_unreached(tmp_path):
         tmp_path,
         {
             "app.py": (
-                "def other():\n"
+                "def _other():\n"
                 "    return 1\n"
                 "\n"
-                "def helper(value):\n"
+                "def _helper(value):\n"
                 "    return value\n"
                 "\n"
                 "def main():\n"
                 "    return 1\n"
-                "    helper(\n"
-                "        other()\n"
+                "    _helper(\n"
+                "        _other()\n"
                 "    )\n"
                 "\n"
                 "if __name__ == '__main__':\n"
@@ -600,7 +603,7 @@ def test_inner_call_on_a_later_dead_line_is_unreached(tmp_path):
         },
     )
     result = scan(tmp_path)
-    for symbol in ("other", "helper"):
+    for symbol in ("_other", "_helper"):
         found = _named(result, symbol)
         assert len(found) == 1
         assert found[0].rule == "UNUSED_FUNCTION"

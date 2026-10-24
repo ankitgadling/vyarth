@@ -10,7 +10,7 @@ from vyarth.config import Config
 from vyarth.discover import relative_posix
 from vyarth.entries import EntrySet
 from vyarth.flow import container_targets, held_elements, _module_function, _module_named
-from vyarth.model import Binding, CallEdge, FileIndex, Finding, make_fingerprint
+from vyarth.model import PUBLIC_NAME_NOTE, Binding, CallEdge, FileIndex, Finding, is_private_name, make_fingerprint
 from vyarth.progress import ScanProgress
 from vyarth.project import Project, call_is_dead
 
@@ -139,6 +139,7 @@ def orphan_findings(
                         )
                     )
                     continue
+                private = is_private_name(binding.name)
                 findings.append(
                     Finding(
                         rule="UNUSED_FUNCTION",
@@ -147,9 +148,9 @@ def orphan_findings(
                         column=binding.column,
                         symbol=binding.name,
                         status="POSSIBLY_DEAD",
-                        confidence=96,
+                        confidence=96 if private else 60,
                         message=_METHOD_MESSAGE.format(name=binding.name),
-                        evidence=("No references found.",),
+                        evidence=("No references found.",) if private else ("No references found.", PUBLIC_NAME_NOTE),
                         fingerprint=make_fingerprint("UNUSED_FUNCTION", relpath, binding.qualname),
                     )
                 )
@@ -191,8 +192,15 @@ def class_attribute_findings(
                 continue
             if _symbol_referenced(project, index, binding, referenced):
                 continue
-            confidence = 60 if binding.name in unresolved else 96
-            evidence = (_UNRESOLVED_NOTE,) if confidence == 60 else ("No references found.",)
+            if binding.name in unresolved:
+                confidence = 60
+                evidence = (_UNRESOLVED_NOTE,)
+            elif is_private_name(binding.name):
+                confidence = 96
+                evidence = ("No references found.",)
+            else:
+                confidence = 60
+                evidence = ("No references found.", PUBLIC_NAME_NOTE)
             findings.append(
                 Finding(
                     rule="UNUSED_VARIABLE",

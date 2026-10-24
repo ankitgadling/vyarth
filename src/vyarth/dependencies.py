@@ -57,6 +57,18 @@ _CANONICAL = {
     "pyopenssl": "pyopenssl",
 }
 _MANIFESTS = {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile", "setup.py"}
+_EXAMPLE_PARTS = {
+    "example",
+    "examples",
+    "sample",
+    "samples",
+    "demo",
+    "demos",
+    "tutorial",
+    "tutorials",
+    "benchmark",
+    "benchmarks",
+}
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -150,13 +162,27 @@ def dependency_findings(
 def _manifest_in_scan(path: Path, root: Path, within: Path | None) -> bool:
     """Keep manifests inside the scanned directory, plus files that sit in the project root.
 
+    A scan of the project root skips manifests under example, tutorial, sample,
+    demo, and benchmark directories. Nested package manifests still count.
     A `vyarth scan src` still sees the root `pyproject.toml`. It does not see
-    `examples/requirements.txt`.
+    `examples/requirements.txt`. Scanning that examples directory does.
     """
     resolved = path.resolve()
-    if within is None or resolved.is_relative_to(within.resolve()):
+    root_resolved = root.resolve()
+    scan_root = root_resolved if within is None else within.resolve()
+    if scan_root == root_resolved and _under_example_tree(resolved, root_resolved):
+        return False
+    if resolved.is_relative_to(scan_root):
         return True
-    return resolved.parent == root.resolve()
+    return resolved.parent == root_resolved
+
+
+def _under_example_tree(path: Path, root: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part.lower() in _EXAMPLE_PARTS for part in relative.parts[:-1])
 
 
 def _import_modules(indexes: list[FileIndex]) -> set[str]:

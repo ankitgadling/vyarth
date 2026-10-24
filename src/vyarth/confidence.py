@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from vyarth.discover import relative_posix
-from vyarth.model import FileIndex, Finding
+from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding, is_private_name
 
 
 _NEUTRAL_DECORATORS = {
@@ -118,6 +118,13 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
             evidence=(_DYNAMIC_MESSAGE,),
         )
     if finding.rule == "UNUSED_VARIABLE":
+        if "." not in qualname and not is_private_name(finding.symbol):
+            return replace(
+                finding,
+                status="POSSIBLY_DEAD",
+                confidence=60,
+                evidence=_with_note(finding.evidence, PUBLIC_NAME_NOTE),
+            )
         return finding
     if finding.rule not in {"UNUSED_FUNCTION", "UNUSED_CLASS"}:
         return finding
@@ -133,7 +140,14 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
         return replace(finding, status="POSSIBLY_DEAD", confidence=min(finding.confidence, 75), evidence=evidence)
     if "." in qualname:
         return finding
-    return replace(finding, status="POSSIBLY_DEAD", confidence=96, evidence=_CHECKLIST)
+    if is_private_name(finding.symbol):
+        return replace(finding, status="POSSIBLY_DEAD", confidence=96, evidence=_CHECKLIST)
+    return replace(
+        finding,
+        status="POSSIBLY_DEAD",
+        confidence=60,
+        evidence=_with_note(_CHECKLIST, PUBLIC_NAME_NOTE),
+    )
 
 
 def _unrecognized_decorator(index: FileIndex, qualname: str) -> bool:
@@ -167,11 +181,11 @@ def _alembic(finding: Finding) -> Finding:
     path = finding.path.replace("\\", "/")
     if "alembic/versions/" not in path or finding.symbol not in _ALEMBIC_NAMES:
         return finding
-    if finding.rule not in _CAPPED_RULES or finding.confidence <= 70:
+    if finding.rule not in _CAPPED_RULES:
         return finding
     return replace(
         finding,
-        confidence=70,
+        confidence=min(finding.confidence, 70),
         status=_lowered_status(finding.status),
         evidence=_with_note(finding.evidence, _ALEMBIC_NOTE),
     )
