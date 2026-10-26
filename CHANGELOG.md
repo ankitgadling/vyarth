@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- An unchanged directory scan reuses the previous finding list. Dependency manifests are collected during file discovery, and cache pruning reads a sidecar instead of every index.
 - Scores a public unused function, class, method, attribute, or module-level variable at 60%. A private name stays at 96%, or 100% for a private module-level variable. `--fail-on high` no longer fails on a library's public surface.
 - Scores duplicate function bodies at 80%, so they stay out of `--fail-on high`.
 - A scan of the project root no longer treats manifests under `examples/`, `tutorial/`, `samples/`, `demo/`, or `benchmarks/` as project dependencies. Nested package manifests still count. Scanning that directory reports its own manifest.

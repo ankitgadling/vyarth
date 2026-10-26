@@ -4,17 +4,27 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 
 from vyarth.baseline import filter_baselined, load_baseline
 from vyarth.confidence import apply_confidence
 from vyarth.config import Config, load_config
-from vyarth.dependencies import dependency_findings
-from vyarth.discover import discover_files, is_test_path, project_root, read_python_source, relative_posix
+from vyarth.dependencies import dependency_findings, selected_manifests
+from vyarth.discover import discover_scan, is_test_path, project_root, read_python_source, relative_posix
 from vyarth.duplicates import duplicate_findings
 from vyarth.ignore import apply_ignores
-from vyarth.incremental import cache_stamp, changed_python_files, load_cached, prune_cache, store_cached
+from vyarth.incremental import (
+    cache_stamp,
+    changed_python_files,
+    load_cached,
+    load_result,
+    prune_cache,
+    result_cache_key,
+    store_cached,
+    store_result,
+)
 from vyarth.model import FileIndex, Finding, ParseError, ScanResult
 from vyarth.progress import ScanProgress
 from vyarth.python_index import PythonAstBackend
@@ -65,10 +75,40 @@ def scan(
             return ScanResult(findings=(), errors=(), files_scanned=0)
 
     _status(progress, "finding python files")
-    files = [target] if single_file else discover_files(root, config, within=requested)
+    if single_file:
+        files = [target]
+        manifests: list[Path] = []
+    else:
+        files, found_manifests = discover_scan(root, config, within=requested)
+        manifests = selected_manifests(found_manifests, root, requested)
     fold = config.fold_map()
     if defines:
         fold.update(defines)
+    cache_result = use_cache and not single_file and not overlays
+    result_key = ""
+    if cache_result:
+        result_key = result_cache_key(
+            root,
+            relative_posix(requested, root),
+            _input_stamps(root, files),
+            _input_stamps(root, manifests),
+            _analysis_payload(config, fold),
+        )
+        cached = load_result(root, result_key)
+        if cached is not None:
+            _status(progress, "using cached result")
+            findings, errors, files_scanned = cached
+            return _finish(
+                findings,
+                errors,
+                files_scanned,
+                root,
+                config,
+                baseline,
+                apply_baseline,
+                report_only,
+            )
+
     _status(progress, "indexing files", _index_detail(0, len(files), 0))
     indexes, errors = _index_files(
         files,
@@ -96,7 +136,13 @@ def scan(
     )
     _status(progress, "checking dependencies")
     if not single_file:
-        dep_findings, dep_errors = dependency_findings(indexes, root, within=requested, config=config)
+        dep_findings, dep_errors = dependency_findings(
+            indexes,
+            root,
+            within=requested,
+            config=config,
+            manifests=manifests,
+        )
         findings.extend(dep_findings)
         errors.extend(dep_errors)
     _status(progress, "checking duplicate code")
@@ -105,14 +151,72 @@ def scan(
     findings = [finding for finding in findings if not is_test_path(finding.path)]
     by_path = {relative_posix(Path(index.path), root): index for index in indexes}
     findings = apply_ignores(findings, by_path, config)
+    if cache_result:
+        store_result(root, result_key, findings, errors, len(indexes))
+    if use_cache and not single_file and requested == root and not overlays:
+        prune_cache(root, {index.path for index in indexes})
+    return _finish(
+        findings,
+        errors,
+        len(indexes),
+        root,
+        config,
+        baseline,
+        apply_baseline,
+        report_only,
+    )
+
+
+def _finish(
+    findings: list[Finding],
+    errors: list[ParseError],
+    files_scanned: int,
+    root: Path,
+    config: Config,
+    baseline: str | Path | None,
+    apply_baseline: bool,
+    report_only: set[str] | None,
+) -> ScanResult:
+    """Apply filters that do not change the analysis itself."""
     findings = _apply_baseline(findings, root, config, baseline, apply_baseline)
     findings = [finding for finding in findings if finding.confidence >= config.min_confidence]
     if report_only is not None:
         findings = [finding for finding in findings if finding.path in report_only]
     findings.sort(key=lambda finding: (finding.path, finding.line, finding.column, finding.rule, finding.symbol))
-    if use_cache and not single_file and requested == root and not overlays:
-        prune_cache(root, {index.path for index in indexes})
-    return ScanResult(findings=tuple(findings), errors=tuple(errors), files_scanned=len(indexes))
+    return ScanResult(findings=tuple(findings), errors=tuple(errors), files_scanned=files_scanned)
+
+
+def _analysis_payload(config: Config, fold: dict[str, str]) -> str:
+    """Config fields that change which names the analysis reports."""
+    payload = {
+        "ignore": list(config.ignore),
+        "exclude": list(config.exclude),
+        "entry_patterns": list(config.entry_patterns),
+        "framework_decorators": list(config.framework_decorators),
+        "entry_points": list(config.entry_points),
+        "fold": sorted(fold.items()),
+        "duplicate_min_statements": config.duplicate_min_statements,
+        "frameworks": list(config.frameworks),
+        "ignore_names": list(config.ignore_names),
+        "ignore_decorators": list(config.ignore_decorators),
+        "ignore_bases": list(config.ignore_bases),
+        "report_dev_dependencies": config.report_dev_dependencies,
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _input_stamps(root: Path, paths: list[Path]) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for path in paths:
+        relative = relative_posix(path, root)
+        try:
+            stat = path.stat()
+        except OSError:
+            rows.append([relative, -1, -1])
+            continue
+        rows.append([relative, stat.st_size, stat.st_mtime_ns])
+    rows.sort()
+    return rows
 
 
 def _index_files(

@@ -18,9 +18,11 @@ from vyarth.model import (
     Decorator,
     DynamicMarker,
     FileIndex,
+    Finding,
     FlowBind,
     IgnoreDirective,
     ImportEdge,
+    ParseError,
     ReturnNote,
     ScopeInfo,
     UnreachableSpan,
@@ -89,8 +91,80 @@ def store_cached(root: Path, relpath: str, stamp: str, index: FileIndex) -> None
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload), encoding="utf-8")
         temporary.replace(path)
+        _remember_cached(root, relpath, stamp, index.path, path)
     except OSError:
         return
+
+
+def load_result(
+    root: Path,
+    key: str,
+) -> tuple[list[Finding], list[ParseError], int] | None:
+    """Findings stored after ignores and before the baseline filter."""
+    path = _result_path(root)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("key") != key:
+        return None
+    try:
+        findings = [_finding_from_dict(item) for item in payload["findings"]]
+        errors = [ParseError(**item) for item in payload["errors"]]
+        scanned = int(payload["files_scanned"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return findings, errors, scanned
+
+
+def store_result(
+    root: Path,
+    key: str,
+    findings: list[Finding],
+    errors: list[ParseError],
+    files_scanned: int,
+) -> None:
+    """Remember a finished analysis. A later scan replays baseline and confidence filters."""
+    try:
+        ensure_cache_markers(root)
+        path = _result_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "key": key,
+            "files_scanned": files_scanned,
+            "findings": [asdict(finding) for finding in findings],
+            "errors": [asdict(error) for error in errors],
+        }
+        _write_json(path, payload)
+    except OSError:
+        return
+
+
+def result_cache_key(
+    root: Path,
+    scan_path: str,
+    files: list[list[object]],
+    manifests: list[list[object]],
+    config_payload: str,
+) -> str:
+    """Identity of every input the analysis reads. Filters applied later are not included."""
+    from vyarth import __version__
+
+    blob = json.dumps(
+        {
+            "version": __version__,
+            "index": INDEX_VERSION,
+            "root": str(root.resolve()),
+            "scan": scan_path,
+            "files": files,
+            "manifests": manifests,
+            "config": config_payload,
+        },
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def cache_stamp(size: int, mtime_ns: int, fold: dict[str, str], duplicate_min_statements: int = 5) -> str:
@@ -119,27 +193,62 @@ def ensure_cache_markers(root: Path) -> None:
 
 
 def prune_cache(root: Path, live_paths: set[str]) -> None:
-    """Delete cache records for files that this directory scan did not index."""
+    """Delete cache records for files that this directory scan did not index.
+
+    The sidecar lists each record's absolute path, so a normal prune does not
+    decode the index. A missing sidecar, or a path that disagrees with the
+    JSON, falls back to reading that record.
+    """
     cache = root / ".vyarth" / "cache"
     if not cache.is_dir():
         return
     live = {str(Path(path)) for path in live_paths}
-    for file in cache.rglob("*.json"):
-        try:
-            payload = json.loads(file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            try:
-                file.unlink(missing_ok=True)
-            except OSError:
-                continue
+    manifest = _load_manifest(root)
+    if manifest is None:
+        _prune_by_reading(cache, live)
+        return
+    kept: dict[str, dict[str, str]] = {}
+    accounted: set[Path] = set()
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        _prune_by_reading(cache, live)
+        return
+    for relpath, entry in files.items():
+        if not isinstance(relpath, str) or not isinstance(entry, dict):
             continue
-        index = payload.get("index") if isinstance(payload, dict) else None
-        stored = index.get("path") if isinstance(index, dict) else None
-        if not isinstance(stored, str) or stored not in live:
-            try:
-                file.unlink(missing_ok=True)
-            except OSError:
-                continue
+        cache_name = entry.get("cache")
+        if not isinstance(cache_name, str):
+            continue
+        file = cache / cache_name
+        try:
+            accounted.add(file.resolve())
+        except OSError:
+            continue
+        if not file.is_file():
+            continue
+        stamp = entry.get("stamp")
+        sidecar_path = entry.get("path") if isinstance(entry.get("path"), str) else None
+        normalized = str(Path(sidecar_path)) if sidecar_path is not None else None
+        if normalized is not None and normalized in live:
+            kept[relpath] = {"stamp": stamp if isinstance(stamp, str) else "", "path": normalized, "cache": cache_name}
+            continue
+        chosen = _path_to_keep(file, live)
+        if chosen is None:
+            _unlink(file)
+            continue
+        kept[relpath] = {"stamp": stamp if isinstance(stamp, str) else "", "path": chosen, "cache": cache_name}
+    for file in cache.rglob("*.json"):
+        if file.name in {"manifest.json", "result.json"}:
+            continue
+        try:
+            resolved = file.resolve()
+        except OSError:
+            continue
+        if resolved in accounted:
+            continue
+        if _path_to_keep(file, live) is None:
+            _unlink(file)
+    _write_manifest(root, kept)
 
 
 def _git_prefix(root: Path) -> str:
@@ -204,6 +313,107 @@ def _git_output(root: Path, args: list[str]) -> str:
 def _cache_path(root: Path, relpath: str) -> Path:
     digest = hashlib.sha256(relpath.encode("utf-8")).hexdigest()
     return root / ".vyarth" / "cache" / digest[:2] / f"{digest}.json"
+
+
+def _result_path(root: Path) -> Path:
+    return root / ".vyarth" / "cache" / "result.json"
+
+
+def _manifest_path(root: Path) -> Path:
+    return root / ".vyarth" / "cache" / "manifest.json"
+
+
+def _remember_cached(root: Path, relpath: str, stamp: str, absolute: str, cache_file: Path) -> None:
+    cache = root / ".vyarth" / "cache"
+    current = _load_manifest(root) or {}
+    files = current.get("files")
+    if not isinstance(files, dict):
+        files = {}
+    try:
+        cache_name = cache_file.resolve().relative_to(cache.resolve()).as_posix()
+    except ValueError:
+        return
+    files[relpath] = {"stamp": stamp, "path": absolute, "cache": cache_name}
+    _write_manifest(root, files)
+
+
+def _load_manifest(root: Path) -> dict | None:
+    path = _manifest_path(root)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _write_manifest(root: Path, files: dict[str, dict[str, str]]) -> None:
+    _write_json(_manifest_path(root), {"files": files})
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _prune_by_reading(cache: Path, live: set[str]) -> None:
+    for file in cache.rglob("*.json"):
+        if file.name in {"manifest.json", "result.json"}:
+            continue
+        if _path_to_keep(file, live) is None:
+            _unlink(file)
+
+
+def _path_to_keep(file: Path, live: set[str]) -> str | None:
+    """Absolute path from the JSON record, or None when the record should be deleted.
+
+    An unreadable record is deleted. The next scan parses that file again and
+    writes the same index.
+    """
+    stored = _stored_index_path(file)
+    if stored is not None and str(Path(stored)) in live:
+        return str(Path(stored))
+    return None
+
+
+def _stored_index_path(file: Path) -> str | None:
+    try:
+        payload = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError, TypeError, ValueError):
+        return None
+    index = payload.get("index") if isinstance(payload, dict) else None
+    stored = index.get("path") if isinstance(index, dict) else None
+    if isinstance(stored, str):
+        return stored
+    return None
+
+
+def _unlink(file: Path) -> None:
+    try:
+        file.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _finding_from_dict(item: dict) -> Finding:
+    evidence = item.get("evidence") or ()
+    return Finding(
+        rule=item["rule"],
+        path=item["path"],
+        line=int(item["line"]),
+        column=int(item["column"]),
+        symbol=item["symbol"],
+        status=item["status"],
+        confidence=int(item["confidence"]),
+        message=item["message"],
+        evidence=tuple(evidence),
+        fingerprint=item["fingerprint"],
+    )
 
 
 def _index_from_dict(data: dict) -> FileIndex:

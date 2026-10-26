@@ -9,7 +9,15 @@ import re
 import tomllib
 
 from vyarth.config import Config
-from vyarth.discover import exclusion_specs, path_excluded, read_python_source, relative_posix
+from vyarth.discover import (
+    MANIFEST_NAMES,
+    MANIFEST_SKIP_DIRS,
+    exclusion_specs,
+    manifest_dir_skipped,
+    path_excluded,
+    read_python_source,
+    relative_posix,
+)
 from vyarth.model import FileIndex, Finding, ParseError, make_fingerprint
 
 
@@ -56,7 +64,7 @@ _CANONICAL = {
     "openssl": "pyopenssl",
     "pyopenssl": "pyopenssl",
 }
-_MANIFESTS = {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile", "setup.py"}
+_MANIFESTS = MANIFEST_NAMES
 _EXAMPLE_PARTS = {
     "example",
     "examples",
@@ -69,19 +77,7 @@ _EXAMPLE_PARTS = {
     "benchmark",
     "benchmarks",
 }
-_SKIP_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".vyarth",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "site-packages",
-    "node_modules",
-}
+_SKIP_DIRS = MANIFEST_SKIP_DIRS
 _IMPORT_ALIAS = {
     "psycopg2-binary": "psycopg2",
     "pyjwt": "jwt",
@@ -95,6 +91,7 @@ def dependency_findings(
     root: Path,
     within: Path | None = None,
     config: Config | None = None,
+    manifests: list[Path] | None = None,
 ) -> tuple[list[Finding], list[ParseError]]:
     if config is None:
         config = Config()
@@ -103,7 +100,8 @@ def dependency_findings(
     distributions = _used_distributions(modules)
     declared: dict[str, tuple[str, int, bool]] = {}
     errors: list[ParseError] = []
-    for manifest, packages, error in _declared(root, config):
+    declared_rows = _declared(root, config) if manifests is None else _read_collected(manifests, root)
+    for manifest, packages, error in declared_rows:
         if not _manifest_in_scan(manifest, root, within):
             continue
         if error is not None:
@@ -157,6 +155,22 @@ def dependency_findings(
             )
         )
     return findings, errors
+
+
+def selected_manifests(paths: list[Path], root: Path, within: Path | None) -> list[Path]:
+    """Manifests from discovery that this scan should read."""
+    return [path for path in paths if _manifest_in_scan(path, root, within)]
+
+
+def _read_collected(
+    manifests: list[Path],
+    root: Path,
+) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
+    rows: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
+    for path in manifests:
+        packages, error = _read_manifest(path, root)
+        rows.append((path, packages, error))
+    return rows
 
 
 def _manifest_in_scan(path: Path, root: Path, within: Path | None) -> bool:
@@ -311,9 +325,9 @@ def _declared(
         directory = Path(dirpath)
         kept: list[str] = []
         for name in dirnames:
-            if name in _SKIP_DIRS or name.endswith(".egg-info"):
-                continue
             relative = relative_posix(directory / name, root)
+            if name in _SKIP_DIRS or name.endswith(".egg-info") or manifest_dir_skipped(relative):
+                continue
             if path_excluded(relative, exclude_spec, gitignore):
                 continue
             kept.append(name)

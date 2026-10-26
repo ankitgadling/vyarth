@@ -14,6 +14,34 @@ import pathspec
 from vyarth.config import TEST_PATTERNS, Config
 
 
+MANIFEST_NAMES = frozenset(
+    {
+        "requirements.txt",
+        "requirements-dev.txt",
+        "pyproject.toml",
+        "Pipfile",
+        "setup.py",
+    }
+)
+# Dependency manifests inside these directories are not project dependencies.
+# Python files there are still indexed when an exclude or gitignore does not skip them.
+MANIFEST_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".vyarth",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "site-packages",
+        "node_modules",
+    }
+)
+
+
 def project_root(start: Path) -> Path:
     """Nearest directory at or above `start` that holds the project file or a git checkout."""
     current = start.resolve()
@@ -29,10 +57,39 @@ def discover_files(root: Path, config: Config, *, within: Path | None = None) ->
     Excludes and `.gitignore` are matched on paths relative to `root`. `within` limits
     the walk when the caller asked to scan a subdirectory of the project.
     """
+    return discover_scan(root, config, within=within)[0]
+
+
+def discover_scan(
+    root: Path,
+    config: Config,
+    *,
+    within: Path | None = None,
+) -> tuple[list[Path], list[Path]]:
+    """Python files and dependency manifests from one walk.
+
+    A subdirectory scan still records manifests that sit in the project root.
+    `dependency_findings` decides which of those manifests belong to the scan.
+    """
     root = root.resolve()
     start = root if within is None else within.resolve()
     exclude_spec, gitignore = exclusion_specs(root, config)
     found: list[Path] = []
+    manifests: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_manifest(path: Path) -> None:
+        if not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        relative = _relative(root, resolved)
+        if _excluded(exclude_spec, gitignore, relative) or manifest_dir_skipped(relative):
+            return
+        seen.add(resolved)
+        manifests.append(resolved)
+
     for dirpath, dirnames, filenames in os_walk(start):
         directory = Path(dirpath)
         kept: list[str] = []
@@ -43,15 +100,27 @@ def discover_files(root: Path, config: Config, *, within: Path | None = None) ->
             kept.append(name)
         dirnames[:] = kept
         for name in filenames:
+            path = directory / name
+            if name in MANIFEST_NAMES:
+                add_manifest(path)
             if not name.endswith(".py"):
                 continue
-            path = directory / name
             rel = _relative(root, path)
             if _excluded(exclude_spec, gitignore, rel):
                 continue
             found.append(path)
+    if start != root:
+        for name in sorted(MANIFEST_NAMES):
+            add_manifest(root / name)
     found.sort(key=lambda path: _relative(root, path))
-    return found
+    manifests.sort(key=lambda path: _relative(root, path))
+    return found, manifests
+
+
+def manifest_dir_skipped(relative: str) -> bool:
+    """True when a manifest sits under a directory the dependency walk never enters."""
+    parts = [part for part in relative.split("/") if part]
+    return any(part in MANIFEST_SKIP_DIRS or part.endswith(".egg-info") for part in parts[:-1])
 
 
 def package_roots(root: Path, extra: Iterable[Path] = ()) -> list[Path]:
