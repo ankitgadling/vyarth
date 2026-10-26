@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 
 from vyarth.config import Config
@@ -11,9 +12,12 @@ from vyarth.entries import EntrySet, collect_entries
 from vyarth.flow import apply_flow
 from vyarth.graph import (
     class_attribute_findings,
+    import_hops,
     orphan_findings,
     reachable_modules,
     reachable_symbols,
+    reexported_symbol,
+    subclass_registry_symbols,
     wildcard_references,
 )
 from vyarth.model import Binding, FileIndex, Finding, ImportEdge, make_fingerprint
@@ -57,6 +61,8 @@ def collect_findings(
     reached, unresolved = reachable_symbols(project, entries)
     referenced, exported = _cross_module_uses(project)
     referenced |= wildcard_references(project)
+    referenced |= import_hops(project)
+    referenced |= subclass_registry_symbols(project)
     referenced |= set(entries.symbols)
     for index in project.indexes:
         relpath = relative_posix(Path(index.path), project.root)
@@ -68,7 +74,19 @@ def collect_findings(
     if check_modules:
         _status(progress, "checking modules")
         findings.extend(_module_findings(project, entries, config))
+    if not entries.symbols and not entries.modules:
+        findings = [_without_entries(item) for item in findings]
     return findings
+
+
+_NO_ENTRY_NOTE = "This scan found no entry point, so this may be a library whose callers are outside the scan."
+
+
+def _without_entries(finding: Finding) -> Finding:
+    """With no entry point anywhere, reachability proves little. Report it as a maybe."""
+    if finding.rule != "ORPHAN_FUNCTION" or finding.confidence <= 60:
+        return finding
+    return replace(finding, confidence=60, evidence=finding.evidence + (_NO_ENTRY_NOTE,))
 
 
 def _status(progress: ScanProgress | None, label: str, detail: str = "") -> None:
@@ -92,7 +110,7 @@ def _symbol_findings(
         if binding.scope_kind == "class" and binding.kind != "import":
             # Methods and class attributes are reached through attribute access.
             continue
-        if _silent_name(binding.name):
+        if _silent_name(binding.name) or _unused_by_design(binding):
             continue
         rule = _KIND_RULES.get(binding.kind)
         if rule is None:
@@ -168,7 +186,13 @@ def _cross_module_uses(project: Project) -> tuple[set[tuple[str, str]], set[tupl
             continue
         target_binding = project.module_binding(target.path, symbol)
         if target_binding is None:
-            continue
+            hit = reexported_symbol(project, target, symbol)
+            if hit is None:
+                continue
+            target = project.by_path[hit[0]]
+            target_binding = project.bindings.get(hit[0], {}).get(hit[1])
+            if target_binding is None:
+                continue
         reached = (target.path, target_binding.qualname)
         referenced.add(reached)
         if from_export:
@@ -297,6 +321,15 @@ def _classify(rule: str) -> tuple[str, int]:
     if rule == "WILDCARD_IMPORT":
         return "ANALYSIS_LIMIT", 60
     return "DEAD", 100
+
+
+def _unused_by_design(binding: Binding) -> bool:
+    """Loop targets, unpacking, `with ... as`, and `_name` locals are unused on purpose."""
+    if binding.kind != "variable":
+        return False
+    if binding.origin:
+        return True
+    return binding.name.startswith("_") and binding.scope_kind not in {"module", "class"}
 
 
 def _silent_name(name: str) -> bool:

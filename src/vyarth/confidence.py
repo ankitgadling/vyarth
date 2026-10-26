@@ -173,9 +173,13 @@ def _symbol_dynamic(finding: Finding, index: FileIndex | None) -> bool:
         names.update(marker.symbols)
     if not names:
         return False
-    if finding.symbol in names:
+    if "*" in names:
         return True
-    return _qualname(finding).rsplit(".", 1)[-1] in names
+    prefixes = tuple(name[:-1] for name in names if name.endswith("*"))
+    leaf = _qualname(finding).rsplit(".", 1)[-1]
+    if prefixes and (finding.symbol.startswith(prefixes) or leaf.startswith(prefixes)):
+        return True
+    return finding.symbol in names or leaf in names
 
 
 def _import_dynamic(index: FileIndex) -> bool:

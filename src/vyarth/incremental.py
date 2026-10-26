@@ -441,6 +441,7 @@ def _index_from_dict(data: dict) -> FileIndex:
         container_stores=tuple(_container(item) for item in data.get("container_stores", ())),
         import_probes=tuple(data.get("import_probes", ())),
         lambda_mentions=tuple(data.get("lambda_mentions", ())),
+        module_strings=tuple(data.get("module_strings", ())),
     )
 
 

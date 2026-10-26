@@ -53,7 +53,7 @@ These are always excluded, in addition to `.gitignore`, `.git/info/exclude`, and
 
 `.git`, `.vyarth`, `.venv`, `venv`, `__pycache__`, `build`, `dist`
 
-`tests/`, `test_*.py`, `*_test.py`, and `conftest.py` are indexed so their imports and calls keep application code alive. Findings inside those paths are hidden. A nested `.gitignore` applies under its directory. A later rule wins, so a nested `!` pattern can un-ignore a file. A `.gitignore` inside an already ignored directory is not read.
+`tests/`, `test/`, `testing/`, `tests.py`, `test_*.py`, `*_test.py`, and `conftest.py` are indexed so their imports and calls keep application code alive. Findings inside those paths are hidden. A nested `.gitignore` applies under its directory. A later rule wins, so a nested `!` pattern can un-ignore a file. A `.gitignore` inside an already ignored directory is not read.
 
 ## `ignore` and `exclude`
 
@@ -72,9 +72,16 @@ The default entry patterns are:
 **/manage.py
 setup.py
 **/docs/conf.py
+noxfile.py
+fabfile.py
+tasks.py
+**/gunicorn.conf.py
+**/alembic/env.py
+scripts/**/*.py
+bin/**/*.py
 ```
 
-`[project.scripts]`, `[project.gui-scripts]`, and the `[project.entry-points]` groups `console_scripts` and `gui_scripts` in `pyproject.toml` are read automatically. `entry_points` adds more targets in the form `pkg.wsgi:app`. A value with no colon names a module.
+`[project.scripts]`, `[project.gui-scripts]`, every `[project.entry-points]` group, `[tool.poetry.scripts]`, and `[tool.poetry.plugins]` in `pyproject.toml` are read automatically, as are `[options.entry_points]` in `setup.cfg` and `entry_points` strings in `setup.py`. A top-level folder that holds packages but is not one itself, such as `backend/app/__init__.py`, is an import root. `entry_points` adds more targets in the form `pkg.wsgi:app`. A value with no colon names a module.
 
 `framework_decorators` matches the decorator’s full name or its final attribute. `myapp.route` matches `@myapp.route` and `@route` does not, unless you also list `route`. The built-in hook names are always recognized. `ignore_decorators` uses the same match and makes the decorated symbol an entry, so its body stays reachable. See [How analysis works](how-analysis-works.md).
 

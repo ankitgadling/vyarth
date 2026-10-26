@@ -120,6 +120,7 @@ def scan(
         overlays,
         progress,
     )
+    had_parse_errors = bool(errors)
 
     # A nested folder that is not a package becomes a root, so `scan examples/app`
     # resolves `import app`. A directory with `__init__.py` keeps its own name.
@@ -148,6 +149,8 @@ def scan(
     _status(progress, "checking duplicate code")
     findings.extend(duplicate_findings(indexes, root, config.duplicate_min_statements))
     findings = apply_confidence(findings, indexes, root)
+    if had_parse_errors:
+        findings = [_soften_for_parse_errors(finding) for finding in findings]
     findings = [finding for finding in findings if not is_test_path(finding.path)]
     by_path = {relative_posix(Path(index.path), root): index for index in indexes}
     findings = apply_ignores(findings, by_path, config)
@@ -164,6 +167,34 @@ def scan(
         baseline,
         apply_baseline,
         report_only,
+    )
+
+
+_PARSE_ERROR_NOTE = "A file failed to parse, so it may use this symbol."
+_PARSE_SENSITIVE = {
+    "UNUSED_FUNCTION",
+    "UNUSED_CLASS",
+    "ORPHAN_FUNCTION",
+    "POSSIBLY_UNUSED_MODULE",
+    "UNUSED_DEPENDENCY",
+    "UNUSED_VARIABLE",
+}
+
+
+def _soften_for_parse_errors(finding: Finding) -> Finding:
+    """A file that did not parse could hold any import or call, so cross-file claims drop to maybe."""
+    if finding.rule not in _PARSE_SENSITIVE or finding.confidence <= 70:
+        return finding
+    if finding.rule == "UNUSED_VARIABLE" and finding.fingerprint.count(":") > 2:
+        qualname = finding.fingerprint.split(":", 2)[2]
+        if "." in qualname:
+            return finding
+    status = "POSSIBLY_DEAD" if finding.status == "DEAD" else finding.status
+    return replace(
+        finding,
+        confidence=70,
+        status=status,
+        evidence=finding.evidence + (_PARSE_ERROR_NOTE,),
     )
 
 

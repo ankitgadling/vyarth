@@ -15,6 +15,13 @@ DEFAULT_ENTRY_PATTERNS: tuple[str, ...] = (
     "**/manage.py",
     "setup.py",
     "**/docs/conf.py",
+    "noxfile.py",
+    "fabfile.py",
+    "tasks.py",
+    "**/gunicorn.conf.py",
+    "**/alembic/env.py",
+    "scripts/**/*.py",
+    "bin/**/*.py",
 )
 
 DEFAULT_EXCLUDES: tuple[str, ...] = (
@@ -38,6 +45,14 @@ TEST_PATTERNS: tuple[str, ...] = (
     "tests",
     "tests/**",
     "**/tests/**",
+    "test",
+    "test/**",
+    "**/test/**",
+    "testing",
+    "testing/**",
+    "**/testing/**",
+    "tests.py",
+    "**/tests.py",
     "test_*.py",
     "**/test_*.py",
     "*_test.py",

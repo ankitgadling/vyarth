@@ -8,7 +8,7 @@ from typing import Any
 
 # Bump when FileIndex gains fields or the indexer changes meaning.
 # The scan cache mixes this into its stamp so old records are not reused.
-INDEX_VERSION = 13
+INDEX_VERSION = 15
 
 PUBLIC_NAME_NOTE = "Public name. Callers outside this project may still load it."
 
@@ -34,6 +34,10 @@ class Binding:
     scope_kind: str
     read_count: int
     typing_only: bool = False
+    # Set when every store of this name is a loop target, an unpacking target,
+    # a `with ... as` name, a comprehension target, or a `match` capture.
+    # Those names are unused by design, so they are not reported.
+    origin: str = ""
 
 
 @dataclass(frozen=True)
@@ -201,6 +205,7 @@ class FileIndex:
     container_stores: tuple[ContainerStore, ...] = ()
     import_probes: tuple[str, ...] = ()
     lambda_mentions: tuple[str, ...] = ()
+    module_strings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

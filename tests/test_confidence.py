@@ -158,7 +158,7 @@ def test_unreachable_code_is_not_capped(tmp_path):
     assert finding.confidence == 100
 
 
-def test_returned_lambda_mention_is_not_certain(tmp_path):
+def test_returned_lambda_is_assumed_to_run(tmp_path):
     write_tree(
         tmp_path,
         {
@@ -181,10 +181,8 @@ def test_returned_lambda_mention_is_not_certain(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings}
-    assert findings["transfunc"].confidence == 60
-    assert findings["transfunc"].status == "POSSIBLY_DEAD"
-    assert findings["Box"].confidence == 60
-    assert findings["Box"].status == "POSSIBLY_DEAD"
+    assert "transfunc" not in findings
+    assert "Box" not in findings
     assert findings["unused"].confidence == 100
     assert findings["unused"].status == "DEAD"
 

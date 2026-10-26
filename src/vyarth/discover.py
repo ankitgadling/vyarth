@@ -130,9 +130,43 @@ def package_roots(root: Path, extra: Iterable[Path] = ()) -> list[Path]:
     src = root / "src"
     if src.is_dir():
         roots.add(src.resolve())
+    roots.update(_inferred_roots(root))
     for item in extra:
         roots.add(item.resolve())
     return sorted(roots, key=lambda path: len(path.as_posix()), reverse=True)
+
+
+_NOT_IMPORT_ROOTS = frozenset(
+    {"tests", "test", "testing", "docs", "doc", "examples", "node_modules", "build", "dist", "venv", "site-packages"}
+)
+
+
+def _inferred_roots(root: Path) -> set[Path]:
+    """Top-level folders that hold packages but are not packages themselves.
+
+    A monorepo layout such as ``backend/app/__init__.py`` is imported as ``app``
+    once ``backend/`` is on ``sys.path``. ``src/`` is handled by the caller.
+    """
+    found: set[Path] = set()
+    try:
+        children = [child for child in root.iterdir() if child.is_dir()]
+    except OSError:
+        return found
+    for child in children:
+        name = child.name
+        if name.startswith((".", "_")) or name == "src" or name in _NOT_IMPORT_ROOTS or not name.isidentifier():
+            continue
+        if (child / "__init__.py").is_file():
+            continue
+        try:
+            has_package = any(
+                grandchild.is_dir() and (grandchild / "__init__.py").is_file() for grandchild in child.iterdir()
+            )
+        except OSError:
+            continue
+        if has_package:
+            found.add(child.resolve())
+    return found
 
 
 def read_python_source(path: str | Path) -> tuple[str, str]:

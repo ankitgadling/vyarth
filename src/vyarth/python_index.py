@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 
 from vyarth.backend import AnalysisBackend
 from vyarth.ignore import collect_ignores, expand_decorator_ignores, expand_import_ignores, import_noqa_ignores
@@ -132,10 +133,12 @@ class _Indexer(ast.NodeVisitor):
         self._import_probe = 0
         self.import_probes: list[str] = []
         self._type_checking = 0
+        self._origin = ""
         self.lambda_mentions: set[str] = set()
+        self.module_strings: set[str] = set()
 
     def index(self) -> FileIndex:
-        tree = ast.parse(self.source, filename=self.path)
+        tree = ast.parse(self.source, filename=self.path, type_comments=True)
         token = _FOLD.set(self.fold)
         try:
             self.visit(tree)
@@ -172,6 +175,7 @@ class _Indexer(ast.NodeVisitor):
             container_stores=tuple(self._container_stores()),
             import_probes=tuple(dict.fromkeys(self.import_probes)),
             lambda_mentions=tuple(sorted(self.lambda_mentions)),
+            module_strings=tuple(sorted(self.module_strings)),
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -202,13 +206,20 @@ class _Indexer(ast.NodeVisitor):
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self._visit_signature(node.args, None)
         name = self._pending_lambdas.pop(id(node), None)
+        tracked = name is not None
         if name is None:
             name = self._fresh("lambda")
-        self._lambda_qualnames[id(node)] = _qualname(self.scope, name)
+        qualname = _qualname(self.scope, name)
+        self._lambda_qualnames[id(node)] = qualname
+        caller = _caller_name(self.scope)
         self._push("lambda", name)
         self._bind_arguments(node.args)
         self.visit(node.body)
         self._pop()
+        if not tracked:
+            # A lambda that is passed along, stored in a container, or returned is
+            # assumed to run. Only `name = lambda: ...` waits for a call to `name`.
+            self._push_raw(_RawCall(caller, self.scope, node.lineno, "lambda", qualname, "", True, node.col_offset))
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
         self._visit_comprehension(node.generators, lambda: self.visit(node.elt))
@@ -238,6 +249,14 @@ class _Indexer(ast.NodeVisitor):
             local = alias.asname or alias.name.split(".")[0]
             line, column = _alias_position(alias, node)
             binding = self._bind(local, "import", line, column)
+            if (
+                alias.asname is not None
+                and alias.asname == alias.name
+                and self.scope.kind == "module"
+            ):
+                # `import os as os` is the PEP 484 spelling of a public re-export.
+                binding.read_count += 1
+                self.exports.add(local)
             self._probe_import(binding)
             self.imports.append(
                 ImportEdge(
@@ -364,6 +383,7 @@ class _Indexer(ast.NodeVisitor):
                 seen_stop = True
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        self._visit_type_comment(node)
         for target in node.targets:
             self._note_exports(target, node.value)
             self._note_instance(target, node.value)
@@ -377,7 +397,31 @@ class _Indexer(ast.NodeVisitor):
         # The value runs before the name is stored, including `version = version`.
         self.visit(node.value)
         for target in node.targets:
-            self.visit(target)
+            if isinstance(target, ast.Tuple | ast.List):
+                self._visit_with_origin("unpack", target)
+            else:
+                self.visit(target)
+
+    def _visit_with_origin(self, origin: str, node: ast.AST) -> None:
+        previous = self._origin
+        self._origin = origin
+        try:
+            self.visit(node)
+        finally:
+            self._origin = previous
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_type_comment(node)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_type_comment(node)
+        self.generic_visit(node)
+
+    def visit_withitem(self, node: ast.withitem) -> None:
+        self.visit(node.context_expr)
+        if node.optional_vars is not None:
+            self._visit_with_origin("with", node.optional_vars)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         if isinstance(node.op, ast.Add):
@@ -391,6 +435,9 @@ class _Indexer(ast.NodeVisitor):
             return
         if isinstance(node.target, ast.Name):
             self._add_load(node.target.id, node.target.lineno, node.target.col_offset)
+        elif isinstance(node.target, ast.Attribute) and not self._suppress:
+            # `self.count += 1` reads the attribute before it writes it.
+            self._record_attribute_load(node.target)
         self.visit(node.value)
         self.visit(node.target)
 
@@ -432,7 +479,12 @@ class _Indexer(ast.NodeVisitor):
     def visit_Match(self, node: ast.Match) -> None:
         self.visit(node.subject)
         for case in node.cases:
-            self._bind_pattern(case.pattern)
+            previous = self._origin
+            self._origin = "match"
+            try:
+                self._bind_pattern(case.pattern)
+            finally:
+                self._origin = previous
             if case.guard is not None:
                 self.visit(case.guard)
             for statement in case.body:
@@ -443,14 +495,24 @@ class _Indexer(ast.NodeVisitor):
             self.visit(node.value)
             return
         if isinstance(node.ctx, ast.Load):
-            if isinstance(node.value, ast.Name):
-                mode = "self" if node.value.id in {"self", "cls"} else "nameattr"
-                self.raw_attrs.append(_RawCall("", self.scope, node.lineno, mode, node.attr, node.value.id))
-            elif isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
-                self.raw_attrs.append(
-                    _RawCall("", self.scope, node.lineno, "constructed", node.attr, node.value.func.id)
-                )
+            self._record_attribute_load(node)
         self.visit(node.value)
+
+    def _record_attribute_load(self, node: ast.Attribute) -> None:
+        value = node.value
+        own = _own_class_receiver(value)
+        if own:
+            self.raw_attrs.append(_RawCall("", self.scope, node.lineno, "self", node.attr, own))
+        elif isinstance(value, ast.Name):
+            mode = "self" if value.id in {"self", "cls"} else "nameattr"
+            self.raw_attrs.append(_RawCall("", self.scope, node.lineno, mode, node.attr, value.id))
+        elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            self.raw_attrs.append(
+                _RawCall("", self.scope, node.lineno, "constructed", node.attr, value.func.id)
+            )
+        else:
+            # The receiver has no known class. The name still counts as a mention.
+            self.raw_attrs.append(_RawCall("", self.scope, node.lineno, "unknown", node.attr, ""))
 
     def visit_Call(self, node: ast.Call) -> None:
         if self._suppress == 0:
@@ -458,7 +520,9 @@ class _Indexer(ast.NodeVisitor):
             self._note_all_mutation(node)
         mutation = _container_mutation(node)
         self._note_call(node)
+        self._note_locals(node)
         cast_type = self._visit_cast_type(node)
+        self._visit_typing_constructor(node)
         if mutation is not None:
             name, slots, mode, index, parts = mutation
             self._visit_container_parts(parts)
@@ -484,6 +548,48 @@ class _Indexer(ast.NodeVisitor):
         self._visit_annotation(node.args[0])
         return node.args[0]
 
+    def _note_locals(self, node: ast.Call) -> None:
+        """`locals()` and a bare `vars()` hand every local name to code this scan cannot see."""
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id not in {"locals", "vars"}:
+            return
+        if node.args or node.keywords or self._suppress:
+            return
+        _assignment_scope(self.scope).reads_locals = True
+
+    def _visit_typing_constructor(self, node: ast.Call) -> None:
+        """Quoted types in `TypeVar`, `NewType`, and functional `TypedDict` / `NamedTuple` are uses."""
+        leaf = _form_name(node.func)
+        if leaf in {"TypeVar", "ParamSpec", "TypeVarTuple"}:
+            for argument in node.args[1:]:
+                self._visit_annotation(argument)
+            for keyword in node.keywords:
+                if keyword.arg in {"bound", "default"}:
+                    self._visit_annotation(keyword.value)
+        elif leaf == "NewType" and len(node.args) >= 2:
+            self._visit_annotation(node.args[1])
+        elif leaf in {"TypedDict", "NamedTuple"} and len(node.args) >= 2:
+            fields = node.args[1]
+            if isinstance(fields, ast.Dict):
+                for value in fields.values:
+                    self._visit_annotation(value)
+            elif isinstance(fields, ast.List | ast.Tuple):
+                for element in fields.elts:
+                    if isinstance(element, ast.Tuple) and len(element.elts) == 2:
+                        self._visit_annotation(element.elts[1])
+            for keyword in node.keywords:
+                if keyword.arg not in {"total", "module", "defaults", "rename"}:
+                    self._visit_annotation(keyword.value)
+
+    def _visit_type_comment(self, node: ast.AST) -> None:
+        """A `# type:` comment names types the same way an annotation does."""
+        text = getattr(node, "type_comment", None)
+        if not text:
+            return
+        function = isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        for expression in _type_comment_exprs(text, node, function):
+            self._visit_annotation(expression)
+
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Load):
             self._add_load(node.id, node.lineno, node.col_offset, value=True)
@@ -491,6 +597,16 @@ class _Indexer(ast.NodeVisitor):
             self._bind(node.id, "variable", node.lineno, node.col_offset)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
+        if _form_name(node.value) == "Literal":
+            # Strings in `Literal[...]` are values, not names.
+            self.visit(node.value)
+            depth = self._annotation_depth
+            self._annotation_depth = 0
+            try:
+                self.visit(node.slice)
+            finally:
+                self._annotation_depth = depth
+            return
         if _is_annotated(node.value):
             self.visit(node.value)
             self._visit_annotated_slice(node.slice)
@@ -531,6 +647,8 @@ class _Indexer(ast.NodeVisitor):
         self.visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str) and _MODULE_STRING.match(node.value):
+            self.module_strings.add(node.value)
         if self._annotation_depth <= 0 or not isinstance(node.value, str):
             return
         parsed = _parse_annotation_expr(node)
@@ -579,8 +697,9 @@ class _Indexer(ast.NodeVisitor):
         return point_in_spans(self._dead_spans, line, col)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
+        self._visit_type_comment(node)
         self.visit(node.iter)
-        self.visit(node.target)
+        self._visit_with_origin("loop", node.target)
         for statement in node.body:
             self.visit(statement)
         for statement in node.orelse:
@@ -602,6 +721,7 @@ class _Indexer(ast.NodeVisitor):
             self.visit(decorator)
         self._visit_type_params(node)
         self._visit_signature(node.args, node.returns)
+        self._visit_type_comment(node)
         self._bind(node.name, "function", node.lineno, node.col_offset)
         self._push("function", node.name)
         self._bind_arguments(node.args)
@@ -613,6 +733,7 @@ class _Indexer(ast.NodeVisitor):
         for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
             if arg.annotation is not None:
                 self._visit_annotation(arg.annotation)
+            self._visit_type_comment(arg)
         if args.vararg and args.vararg.annotation is not None:
             self._visit_annotation(args.vararg.annotation)
         if args.kwarg and args.kwarg.annotation is not None:
@@ -647,12 +768,12 @@ class _Indexer(ast.NodeVisitor):
         # The first iterable is evaluated in the enclosing scope.
         self.visit(generators[0].iter)
         self._push("comprehension", self._fresh("comprehension"))
-        self.visit(generators[0].target)
+        self._visit_with_origin("comp", generators[0].target)
         for test in generators[0].ifs:
             self.visit(test)
         for generator in generators[1:]:
             self.visit(generator.iter)
-            self.visit(generator.target)
+            self._visit_with_origin("comp", generator.target)
             for test in generator.ifs:
                 self.visit(test)
         visit_elements()
@@ -693,6 +814,8 @@ class _Indexer(ast.NodeVisitor):
         scope = self._store_scope(name)
         existing = scope.bindings.get(name)
         if existing is not None:
+            if self._origin == "" or kind != "variable":
+                existing.origin = ""
             if self._type_checking == 0:
                 existing.typing_only = False
             if existing.kind == "variable" and kind in {"function", "class", "import"}:
@@ -715,6 +838,8 @@ class _Indexer(ast.NodeVisitor):
             scope=scope,
         )
         binding.typing_only = self._type_checking > 0
+        if kind == "variable":
+            binding.origin = self._origin
         scope.bindings[name] = binding
         return binding
 
@@ -758,6 +883,15 @@ class _Indexer(ast.NodeVisitor):
                 binding.read_count += 1
             elif wildcard:
                 self.unbound.add(site.name)
+        self._apply_locals_reads(self.module)
+
+    def _apply_locals_reads(self, scope: _Scope) -> None:
+        if scope.reads_locals:
+            for binding in scope.bindings.values():
+                if binding.kind == "variable":
+                    binding.read_count += 1
+        for child in scope.children:
+            self._apply_locals_reads(child)
 
     def _value_uses(self) -> list[tuple[str, str]]:
         found: list[tuple[str, str]] = []
@@ -781,6 +915,8 @@ class _Indexer(ast.NodeVisitor):
             class_qualname = self._class_for_owner(raw.scope, raw.owner, raw.mode, instances)
             if class_qualname:
                 add(raw.scope, f"{class_qualname}.{raw.name}")
+            else:
+                add(raw.scope, f"@attr:{raw.name}")
         return found
 
     def _class_bases(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -1050,6 +1186,11 @@ class _Indexer(ast.NodeVisitor):
             self._add_load(value.id, value.lineno, value.col_offset)
             self._push_raw(_RawCall(caller, self.scope, line, "self", func.attr, value.id, True, func.col_offset))
             return
+        own = _own_class_receiver(value)
+        if own:
+            self.visit(value)
+            self._push_raw(_RawCall(caller, self.scope, line, "self", func.attr, own, True, func.col_offset))
+            return
         if isinstance(value, ast.Name):
             self._add_load(value.id, value.lineno, value.col_offset, value=True)
             mode = "instance" if any(item.name == value.id and item.scope is self.scope for item in self.instances) else "classattr"
@@ -1157,8 +1298,62 @@ class _Indexer(ast.NodeVisitor):
                 self._note_attribute_call(expr, caller, line)
 
 
-_TYPING_FORMS = {"Union", "Optional", "Annotated", "Callable"}
+_TYPING_FORMS = {
+    "Union",
+    "Optional",
+    "Annotated",
+    "Callable",
+    "List",
+    "Dict",
+    "Set",
+    "FrozenSet",
+    "Tuple",
+    "Type",
+    "DefaultDict",
+    "OrderedDict",
+    "Counter",
+    "Deque",
+    "ChainMap",
+    "Sequence",
+    "MutableSequence",
+    "Mapping",
+    "MutableMapping",
+    "MutableSet",
+    "AbstractSet",
+    "Iterable",
+    "Iterator",
+    "Collection",
+    "Container",
+    "Generator",
+    "AsyncIterable",
+    "AsyncIterator",
+    "AsyncGenerator",
+    "Awaitable",
+    "Coroutine",
+    "ClassVar",
+    "Final",
+    "Generic",
+    "Protocol",
+    "TypeGuard",
+    "Required",
+    "NotRequired",
+    "ReadOnly",
+    "Concatenate",
+    "Unpack",
+    "ContextManager",
+    "AsyncContextManager",
+    "Pattern",
+    "Match",
+    "IO",
+    "list",
+    "dict",
+    "set",
+    "frozenset",
+    "tuple",
+    "type",
+}
 _IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError"}
+_MODULE_STRING = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 def _form_name(node: ast.expr) -> str | None:
@@ -1171,6 +1366,49 @@ def _form_name(node: ast.expr) -> str | None:
 
 def _is_typing_form(node: ast.expr) -> bool:
     return _form_name(node) in _TYPING_FORMS
+
+
+def _own_class_receiver(node: ast.expr) -> str:
+    """`self` or `cls` for `type(self)` and `self.__class__`. Empty for any other receiver."""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "type"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in {"self", "cls"}
+    ):
+        return node.args[0].id
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "__class__"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in {"self", "cls"}
+    ):
+        return node.value.id
+    return ""
+
+
+def _type_comment_exprs(text: str, node: ast.AST, function: bool) -> list[ast.expr]:
+    """Types named in a `# type:` comment, located at the statement that carries it."""
+    try:
+        if function:
+            parsed = ast.parse(text, mode="func_type")
+            expressions = [*parsed.argtypes, parsed.returns]  # type: ignore[attr-defined]
+        else:
+            expressions = [ast.parse(text, mode="eval").body]
+    except SyntaxError:
+        return []
+    line = getattr(node, "lineno", 1)
+    column = getattr(node, "col_offset", 0)
+    for expression in expressions:
+        for child in ast.walk(expression):
+            if isinstance(child, ast.expr):
+                child.lineno = line
+                child.col_offset = column
+                child.end_lineno = line
+                child.end_col_offset = column
+    return expressions
 
 
 def _is_type_alias(node: ast.expr | None) -> bool:

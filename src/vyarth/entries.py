@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import pathspec
 
@@ -43,6 +44,24 @@ _ENTRY_SUFFIXES = frozenset(
         "command",
         "group",
         "fixture",
+        "websocket",
+        "on_event",
+        "middleware",
+        "exception_handler",
+        "errorhandler",
+        "before_request",
+        "after_request",
+        "teardown_request",
+        "context_processor",
+        "template_filter",
+        "template_global",
+        "listens_for",
+        "receiver",
+        "hookimpl",
+        "hookspec",
+        "periodic_task",
+        "subscriber",
+        "listener",
     }
 )
 
@@ -180,24 +199,72 @@ def _configured_symbols(root: Path, config: Config) -> list[tuple[str, str]]:
 
 
 def _pyproject_scripts(root: Path) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
     path = root / "pyproject.toml"
+    if path.is_file():
+        import tomllib
+
+        try:
+            with path.open("rb") as handle:
+                data = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        project = data.get("project", {})
+        if isinstance(project, dict):
+            for key in ("scripts", "gui-scripts"):
+                _collect_scripts(project.get(key, {}), found)
+            _collect_groups(project.get("entry-points", {}), found)
+        tool = data.get("tool", {})
+        poetry = tool.get("poetry", {}) if isinstance(tool, dict) else {}
+        if isinstance(poetry, dict):
+            _collect_scripts(poetry.get("scripts", {}), found)
+            _collect_groups(poetry.get("plugins", {}), found)
+    found.extend(_setup_cfg_scripts(root / "setup.cfg"))
+    found.extend(_setup_py_scripts(root / "setup.py"))
+    return found
+
+
+def _collect_groups(groups: object, found: list[tuple[str, str]]) -> None:
+    """Every entry-point group, not only console scripts: plugins load by name."""
+    if not isinstance(groups, dict):
+        return
+    for table in groups.values():
+        _collect_scripts(table, found)
+
+
+def _setup_cfg_scripts(path: Path) -> list[tuple[str, str]]:
     if not path.is_file():
         return []
-    import tomllib
+    import configparser
 
-    with path.open("rb") as handle:
-        data = tomllib.load(handle)
-    project = data.get("project", {})
-    if not isinstance(project, dict):
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(path, encoding="utf-8")
+    except (OSError, configparser.Error, UnicodeDecodeError):
         return []
     found: list[tuple[str, str]] = []
-    for key in ("scripts", "gui-scripts"):
-        _collect_scripts(project.get(key, {}), found)
-    entry_points = project.get("entry-points", {})
-    if isinstance(entry_points, dict):
-        for key in ("console_scripts", "gui_scripts"):
-            _collect_scripts(entry_points.get(key, {}), found)
+    if not parser.has_section("options.entry_points"):
+        return found
+    for _group, block in parser.items("options.entry_points"):
+        for line in block.splitlines():
+            _, _, target = line.partition("=")
+            parsed = _parse_entrypoint(target) if target.strip() else None
+            if parsed is not None:
+                found.append(parsed)
     return found
+
+
+_SETUP_ENTRY = re.compile(r"""['"]\s*[\w.\-]+\s*=\s*([\w.]+):([\w.]+)\s*(?:\[[^\]]*\])?\s*['"]""")
+
+
+def _setup_py_scripts(path: Path) -> list[tuple[str, str]]:
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [(match.group(1), match.group(2)) for match in _SETUP_ENTRY.finditer(text)]
 
 
 def _collect_scripts(table: object, found: list[tuple[str, str]]) -> None:
@@ -213,6 +280,8 @@ def _collect_scripts(table: object, found: list[tuple[str, str]]) -> None:
 
 def _parse_entrypoint(value: str) -> tuple[str, str] | None:
     text = value.strip()
+    if "[" in text:
+        text = text.split("[", 1)[0].strip()
     if ":" not in text:
         return (text, "") if text else None
     module, _, qualname = text.partition(":")

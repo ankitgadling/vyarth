@@ -1665,17 +1665,10 @@ def test_scanning_a_package_directory_keeps_its_name(tmp_path):
         assert "run" not in symbols
 
 
-def test_comprehension_fingerprint_stays_when_a_function_is_inserted(tmp_path):
+def test_unused_comprehension_target_is_not_reported(tmp_path):
     path = tmp_path / "a.py"
     path.write_text("def f():\n    return [1 for i in range(3)]\n\nf()\n", encoding="utf-8")
-    before = next(item.fingerprint for item in scan(path).findings if item.symbol == "i")
-    path.write_text(
-        "def earlier():\n    return 1\n\ndef f():\n    return [1 for i in range(3)]\n\nearlier()\nf()\n",
-        encoding="utf-8",
-    )
-    after = next(item.fingerprint for item in scan(path).findings if item.symbol == "i")
-    assert before == after
-    assert "<comprehension#1>" in before
+    assert not [item for item in scan(path).findings if item.symbol == "i"]
 
 
 def test_ignore_bases_covers_a_class_nested_in_a_function(tmp_path):

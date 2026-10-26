@@ -46,8 +46,46 @@ _RUNTIME_ONLY = frozenset(
         "redis",
         "hiredis",
         "whitenoise",
+        "python-multipart",
+        "uvloop",
+        "httptools",
+        "email-validator",
     }
 )
+_TOOLING_NOTE = "This package is a tool or plugin that runs without being imported."
+_STRING_NOTE = "A string in the source names this package, as settings and plugin lists do."
+_TOOLING = frozenset(
+    {
+        "black",
+        "flake8",
+        "mypy",
+        "pylint",
+        "ruff",
+        "isort",
+        "pytest",
+        "coverage",
+        "tox",
+        "nox",
+        "pre-commit",
+        "setuptools",
+        "wheel",
+        "pip",
+        "pip-tools",
+        "twine",
+        "build",
+        "bandit",
+        "pyright",
+        "autopep8",
+        "yapf",
+        "sphinx",
+        "mkdocs",
+        "celery",
+        "alembic",
+        "supervisor",
+    }
+)
+_TOOLING_PREFIXES = ("pytest-", "flake8-", "types-", "mypy-", "pylint-", "sphinx-", "mkdocs-", "django-stubs")
+_TOOLING_SUFFIXES = ("-stubs",)
 _DEV_EXTRAS = {"dev", "test", "tests", "docs", "doc", "lint"}
 _CANONICAL = {
     "pil": "pillow",
@@ -98,6 +136,7 @@ def dependency_findings(
     modules = _import_modules(indexes)
     imported = {_canonical(_top_level(name)) for name in modules}
     distributions = _used_distributions(modules)
+    string_tops = {text.split(".", 1)[0].lower() for index in indexes for text in index.module_strings}
     declared: dict[str, tuple[str, int, bool]] = {}
     errors: list[ParseError] = []
     declared_rows = _declared(root, config) if manifests is None else _read_collected(manifests, root)
@@ -131,6 +170,12 @@ def dependency_findings(
                 continue
             confidence = 70
             evidence = (_DEV_EVIDENCE.format(path=relpath),)
+        elif _is_tooling(name):
+            confidence = 70
+            evidence = (_TOOLING_NOTE,)
+        elif _named_in_strings(name, string_tops):
+            confidence = 70
+            evidence = (_STRING_NOTE,)
         elif name in _RUNTIME_ONLY:
             confidence = 70
             evidence = (_RUNTIME_NOTE,)
@@ -303,6 +348,24 @@ def _import_match(name: str, modules: set[str]) -> str:
                 return "used"
             namespace = True
     return "namespace" if namespace else ""
+
+
+def _is_tooling(name: str) -> bool:
+    return name in _TOOLING or name.startswith(_TOOLING_PREFIXES) or name.endswith(_TOOLING_SUFFIXES)
+
+
+def _named_in_strings(name: str, string_tops: set[str]) -> bool:
+    """True when a source string equals an import name of this distribution."""
+    if not string_tops:
+        return False
+    candidates = {name.replace("-", "_"), name.replace("-", "")}
+    alias = _IMPORT_ALIAS.get(name)
+    if alias:
+        candidates.add(alias)
+    for top, dists in _distribution_map().items():
+        if any(_canonical(str(dist)) == name for dist in dists):
+            candidates.add(top)
+    return any(candidate.lower() in string_tops for candidate in candidates)
 
 
 def _top_level(name: str) -> str:
