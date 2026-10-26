@@ -33,6 +33,7 @@ class _Binding:
         self.column = column
         self.scope = scope
         self.read_count = 0
+        self.typing_only = False
 
     def freeze(self) -> Binding:
         return Binding(
@@ -44,6 +45,7 @@ class _Binding:
             scope_id=self.scope.id,
             scope_kind=self.scope.kind,
             read_count=self.read_count,
+            typing_only=self.typing_only,
         )
 
 class _Load:

@@ -156,3 +156,78 @@ def test_unreachable_code_is_not_capped(tmp_path):
     )
     finding = next(item for item in scan(tmp_path).findings if item.rule == "UNREACHABLE_CODE")
     assert finding.confidence == 100
+
+
+def test_returned_lambda_mention_is_not_certain(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def select(items):\n"
+                "    def transfunc(item):\n"
+                "        return item\n"
+                "\n"
+                "    class Box:\n"
+                "        pass\n"
+                "\n"
+                "    def unused():\n"
+                "        return 0\n"
+                "\n"
+                "    return lambda item: Box(transfunc(item))\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    select([])\n"
+            ),
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings}
+    assert findings["transfunc"].confidence == 60
+    assert findings["transfunc"].status == "POSSIBLY_DEAD"
+    assert findings["Box"].confidence == 60
+    assert findings["Box"].status == "POSSIBLY_DEAD"
+    assert findings["unused"].confidence == 100
+    assert findings["unused"].status == "DEAD"
+
+
+def test_called_lambda_reaches_its_target(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def select(items):\n"
+                "    def transfunc(item):\n"
+                "        return item\n"
+                "\n"
+                "    return (lambda item: transfunc(item))(items)\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    select([])\n"
+            ),
+        },
+    )
+    assert [item.symbol for item in scan(tmp_path).findings if item.symbol == "transfunc"] == []
+
+
+def test_type_checking_assignment_is_not_dead(tmp_path):
+    path = tmp_path / "conn.py"
+    path.write_text(
+        "import typing\n"
+        "from typing import TYPE_CHECKING\n"
+        "\n"
+        "class EmscriptenHTTPConnection:\n"
+        "    def __init__(self, host, port):\n"
+        "        self.host = host\n"
+        "\n"
+        "_kept = 1\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    _supports_http_protocol = EmscriptenHTTPConnection('', 0)\n"
+        "    _kept = 2\n"
+        "if TYPE_CHECKING:\n"
+        "    _supports_https_protocol = EmscriptenHTTPConnection('', 0)\n",
+        encoding="utf-8",
+    )
+    symbols = {item.symbol for item in scan(path).findings}
+    assert "_supports_http_protocol" not in symbols
+    assert "_supports_https_protocol" not in symbols
+    assert "EmscriptenHTTPConnection" not in symbols
+    assert "_kept" in symbols

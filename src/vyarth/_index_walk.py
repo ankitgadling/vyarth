@@ -657,7 +657,9 @@ def _walk_inside(
 ) -> None:
     if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
         stack.append(statement.name)
+        before = len(spans)
         _walk_block(statement.body, stack, spans, source)
+        _drop_sole_yield(statement, stack, spans, before)
         stack.pop()
         return
     if isinstance(statement, ast.ClassDef):
@@ -723,6 +725,40 @@ def _walk_inside(
     if isinstance(statement, ast.Match):
         for case in statement.cases:
             _walk_block(case.body, stack, spans, source)
+
+def _drop_sole_yield(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    stack: list[str],
+    spans: list[UnreachableSpan],
+    before: int,
+) -> None:
+    """The only yield keeps the function a generator, so it is not dead code."""
+    yields = _owned_yields(function)
+    if len(yields) != 1:
+        return
+    line = yields[0].lineno
+    qualname = ".".join(stack)
+    spans[before:] = [
+        span
+        for span in spans[before:]
+        if not (span.scope_qualname == qualname and span.line == line)
+    ]
+
+
+def _owned_yields(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Yield | ast.YieldFrom]:
+    found: list[ast.Yield | ast.YieldFrom] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+                continue
+            if isinstance(child, ast.Yield | ast.YieldFrom):
+                found.append(child)
+            walk(child)
+
+    walk(function)
+    return found
+
 
 def _record(
     statement: ast.stmt,

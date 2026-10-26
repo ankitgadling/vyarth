@@ -63,6 +63,18 @@ from vyarth._index_walk import (
 )
 
 
+def _is_type_checking(test: ast.expr) -> bool:
+    """True for `TYPE_CHECKING` and `typing.TYPE_CHECKING`."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return (
+        isinstance(test, ast.Attribute)
+        and test.attr == "TYPE_CHECKING"
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "typing"
+    )
+
+
 def _base_expression(node: ast.expr) -> str:
     """Name of a class base, unwrapping subscripts and calls.
 
@@ -119,6 +131,8 @@ class _Indexer(ast.NodeVisitor):
         self._annotation_depth = 0
         self._import_probe = 0
         self.import_probes: list[str] = []
+        self._type_checking = 0
+        self.lambda_mentions: set[str] = set()
 
     def index(self) -> FileIndex:
         tree = ast.parse(self.source, filename=self.path)
@@ -157,6 +171,7 @@ class _Indexer(ast.NodeVisitor):
             dynamic_imports=tuple(dict.fromkeys(self.dynamic_imports)),
             container_stores=tuple(self._container_stores()),
             import_probes=tuple(dict.fromkeys(self.import_probes)),
+            lambda_mentions=tuple(sorted(self.lambda_mentions)),
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -316,14 +331,20 @@ class _Indexer(ast.NodeVisitor):
         if self.scope.kind == "module" and _is_main_guard(node.test):
             self.has_main_guard = True
         self.visit(node.test)
-        self._branches.append(f"if:{node.lineno}:body")
-        for statement in node.body:
-            self.visit(statement)
-        self._branches.pop()
-        self._branches.append(f"if:{node.lineno}:else")
-        for statement in node.orelse:
-            self.visit(statement)
-        self._branches.pop()
+        self._visit_branch(node.body, f"if:{node.lineno}:body", _is_type_checking(node.test))
+        self._visit_branch(node.orelse, f"if:{node.lineno}:else", False)
+
+    def _visit_branch(self, statements: list[ast.stmt], label: str, typing_only: bool) -> None:
+        self._branches.append(label)
+        if typing_only:
+            self._type_checking += 1
+        try:
+            for statement in statements:
+                self.visit(statement)
+        finally:
+            if typing_only:
+                self._type_checking -= 1
+            self._branches.pop()
 
     def visit_BoolOp(self, node: ast.BoolOp) -> None:
         seen_stop = False
@@ -388,7 +409,10 @@ class _Indexer(ast.NodeVisitor):
             self._note_exports(node.target, node.value)
             self._note_instance(node.target, node.value)
             self._note_flow(node.target, node.value)
-            self.visit(node.value)
+            if _is_type_alias(node.annotation):
+                self._visit_annotation(node.value)
+            else:
+                self.visit(node.value)
             self.visit(node.target)
 
     def _note_exports(self, target: ast.expr, value: ast.expr) -> None:
@@ -669,6 +693,8 @@ class _Indexer(ast.NodeVisitor):
         scope = self._store_scope(name)
         existing = scope.bindings.get(name)
         if existing is not None:
+            if self._type_checking == 0:
+                existing.typing_only = False
             if existing.kind == "variable" and kind in {"function", "class", "import"}:
                 existing.kind = kind
                 existing.line = line
@@ -688,6 +714,7 @@ class _Indexer(ast.NodeVisitor):
             column=_column(column),
             scope=scope,
         )
+        binding.typing_only = self._type_checking > 0
         scope.bindings[name] = binding
         return binding
 
@@ -724,6 +751,8 @@ class _Indexer(ast.NodeVisitor):
             # An uncalled lambda must not keep a function or class alive just by naming it.
             # Imports and variables loaded in the lambda are real uses.
             if _inside_lambda(site.scope) and (binding is None or binding.kind in {"function", "class"}):
+                if binding is not None:
+                    self.lambda_mentions.add(binding.qualname)
                 continue
             if binding is not None:
                 binding.read_count += 1
@@ -821,6 +850,8 @@ class _Indexer(ast.NodeVisitor):
                 continue
             if raw.mode == "name":
                 binding = _resolve(raw.scope, raw.name, self.module, class_bound=raw.class_bound)
+                if binding is not None and binding.kind in {"function", "class"} and _inside_lambda(raw.scope):
+                    self.lambda_mentions.add(binding.qualname)
                 edges.append(
                     CallEdge(
                         caller=raw.caller,
@@ -835,6 +866,8 @@ class _Indexer(ast.NodeVisitor):
                 continue
             class_qualname = self._class_for_owner(raw.scope, raw.owner, raw.mode, instances)
             if class_qualname:
+                if _inside_lambda(raw.scope):
+                    self.lambda_mentions.add(f"{class_qualname}.{raw.name}")
                 edges.append(
                     CallEdge(
                         caller=raw.caller,
@@ -1124,7 +1157,7 @@ class _Indexer(ast.NodeVisitor):
                 self._note_attribute_call(expr, caller, line)
 
 
-_TYPING_FORMS = {"Union", "Optional", "Annotated"}
+_TYPING_FORMS = {"Union", "Optional", "Annotated", "Callable"}
 _IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError"}
 
 
@@ -1138,6 +1171,10 @@ def _form_name(node: ast.expr) -> str | None:
 
 def _is_typing_form(node: ast.expr) -> bool:
     return _form_name(node) in _TYPING_FORMS
+
+
+def _is_type_alias(node: ast.expr | None) -> bool:
+    return _form_name(node) == "TypeAlias" if node is not None else False
 
 
 def _is_annotated(node: ast.expr) -> bool:

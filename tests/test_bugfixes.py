@@ -309,6 +309,22 @@ def test_fix_removes_every_name_in_a_parenthesized_import(tmp_path):
     assert len(notes) == 2
 
 
+def test_quoted_name_inside_callable_keeps_a_type_checking_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, Any, Callable, TypeAlias\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        'HookType: TypeAlias = Callable[["Decimal"], Any]\n',
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "Decimal" not in unused
+    assert "Fraction" in unused
+
+
 def test_quoted_annotation_keeps_a_type_checking_import(tmp_path):
     path = tmp_path / "app.py"
     path.write_text(
@@ -364,6 +380,23 @@ def test_cache_stamp_includes_the_analyzer_version():
 
     stamp = cache_stamp(4, 8, {"A": "b"})
     assert stamp.startswith(f"{__version__}:{INDEX_VERSION}:")
+
+
+def test_cached_index_tolerates_missing_confidence_fields():
+    from dataclasses import asdict
+
+    from vyarth.incremental import _index_from_dict
+    from vyarth.python_index import PythonAstBackend
+
+    index = PythonAstBackend().index_source("app.py", "def helper():\n    return 1\n")
+    data = asdict(index)
+    for item in data["bindings"]:
+        del item["typing_only"]
+    del data["lambda_mentions"]
+    loaded = _index_from_dict(data)
+    assert loaded.lambda_mentions == ()
+    binding = next(item for item in loaded.bindings if item.name == "helper")
+    assert binding.typing_only is False
 
 
 def test_later_assignment_is_the_call_target(tmp_path):

@@ -141,7 +141,8 @@ def test_uncalled_lambda_does_not_reach_callee(tmp_path):
     unused = _named(result, "_unused")
     assert len(unused) == 1
     assert unused[0].rule == "UNUSED_FUNCTION"
-    assert unused[0].confidence >= 96
+    assert unused[0].confidence == 60
+    assert unused[0].status == "POSSIBLY_DEAD"
     assert _named(result, "used") == []
 
 

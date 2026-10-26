@@ -82,7 +82,7 @@ The project is still indexed, so a call from an unchanged file keeps a symbol al
 
 | Floor | Flag | What still fails the job |
 | --- | --- | --- |
-| 90 | `--fail-on high` | Unused nested code, unreachable statements, wildcard imports, unused dependencies at 95, and private unused functions, classes, and attributes at 96. Public names score 60. Duplicates score 80. |
+| 90 | `--fail-on high` | Unused nested code, unreachable statements, unused dependencies at 95, and private unused functions, classes, and attributes at 96. Public names and wildcard imports score 60. Duplicates score 80. |
 | 70 | `--fail-on medium` | The high set, plus duplicates, dynamic-name findings, Alembic migration names, import-name mismatches, and orphan functions at 80. Public names stay at 60 and do not fail this gate. |
 | 0 | `--fail-on low` | Every printed finding, including unused modules at 82 or 60 and unresolved orphans at 60. |
 

@@ -87,6 +87,8 @@ def _symbol_findings(
     for binding in index.bindings:
         if _binding_is_used(index, binding, referenced, entries, reached) or binding.kind == "parameter":
             continue
+        if binding.typing_only and binding.kind != "import":
+            continue
         if binding.scope_kind == "class" and binding.kind != "import":
             # Methods and class attributes are reached through attribute access.
             continue
@@ -293,7 +295,7 @@ def _finding(
 
 def _classify(rule: str) -> tuple[str, int]:
     if rule == "WILDCARD_IMPORT":
-        return "ANALYSIS_LIMIT", 100
+        return "ANALYSIS_LIMIT", 60
     return "DEAD", 100
 
 

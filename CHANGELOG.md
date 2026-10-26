@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A quoted name inside `Callable[["Name"], Any]`, including the value of a `TypeAlias`, counts as a use of that name.
+- Confidence 100 is only a name or statement that is unused and safe to delete.
 - An unchanged directory scan reuses the previous finding list. Dependency manifests are collected during file discovery, and cache pruning reads a sidecar instead of every index.
 - Scores a public unused function, class, method, attribute, or module-level variable at 60%. A private name stays at 96%, or 100% for a private module-level variable. `--fail-on high` no longer fails on a library's public surface.
 - Scores duplicate function bodies at 80%, so they stay out of `--fail-on high`.

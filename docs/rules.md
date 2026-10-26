@@ -7,13 +7,13 @@ Each finding has a rule, a status, a confidence from 0 to 100, a message, eviden
 | Rule | Meaning | Confidence | Status |
 | --- | --- | --- | --- |
 | `UNUSED_IMPORT` | Import name never loaded | 100, or 70 for a dynamic import, an `ImportError` probe, a possible `__init__.py` re-export, or a dotted side-effect import | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 96 when the name is private, 60 when the name is public, 60 when the class has an external base, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 96 when the name is private, 60 when the name is public, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
+| `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 60 when only a lambda mentions it, 96 when the name is private, 60 when the name is public, 60 when the class has an external base, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
+| `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 60 when only a lambda mentions it, 96 when the name is private, 60 when the name is public, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
 | `UNUSED_VARIABLE` | Module, class, or function variable never read | 100 in a function or for a private module-level name, 60 for a public module-level name, 96 for a private attribute on a used class, 60 for a public attribute, 70 or 60 when a dynamic or unresolved call uses the name | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNREACHABLE_CODE` | Statement after an exit, or a literal `False` branch | 100 | `DEAD` |
+| `UNREACHABLE_CODE` | Statement after an exit, or a literal `False` branch. The only `yield` in a function is omitted | 100 | `DEAD` |
 | `ORPHAN_FUNCTION` | Referenced, but no entry point reaches it | 80, or 60 when an unresolved attribute call uses the name | `POSSIBLY_DEAD` |
 | `POSSIBLY_UNUSED_MODULE` | No entry module can import this file | 82, or 60 when the project imports dynamically | `POSSIBLY_UNUSED_MODULE` |
-| `WILDCARD_IMPORT` | `from module import *` limits analysis | 100 | `ANALYSIS_LIMIT` |
+| `WILDCARD_IMPORT` | `from module import *` limits analysis | 60 | `ANALYSIS_LIMIT` |
 | `UNUSED_DEPENDENCY` | Declared package with no import | 95, or 70 when the import name differs, the match is only a shared top-level namespace, distribution metadata is unavailable, or the package is a runtime-only or reported development dependency | `POSSIBLY_DEAD` |
 | `DUPLICATE_CODE` | Function body matches another function | 80 | `POSSIBLY_DUPLICATE` |
 
@@ -25,7 +25,7 @@ A load is a read: a call, a decorator, passing the name as a value, or using it 
 
 The name `_` and dunder names such as `__all__` are not reported. Parameters are indexed and not reported.
 
-`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, the first argument of `Annotated`, or a `|` expression does too. So does the first argument of `cast("Fraction", value)`. A string inside `Literal`, or later `Annotated` metadata, does not.
+`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, `Callable`, the first argument of `Annotated`, a `|` expression, or the value of a `TypeAlias` does too. So does the first argument of `cast("Fraction", value)`. A string inside `Literal`, or later `Annotated` metadata, does not.
 
 A name listed in `__all__` is used. So is a name that another project module imports and then loads: a call, an annotation, or another `__all__` entry. An import that nothing in the importing file loads does not keep the original definition alive. Passing a function as a value (`handlers.append(foo)`) is a use.
 
@@ -86,7 +86,7 @@ Scanning a single file skips this rule.
 
 ## `WILDCARD_IMPORT`
 
-`from module import *` is reported so you can see where analysis is incomplete. The imported names are still treated as possible references when the target module is in the project.
+`from module import *` is reported so you can see where analysis is incomplete. It scores 60% because the import is not unused code. The imported names are still treated as possible references when the target module is in the project.
 
 ## `UNUSED_DEPENDENCY`
 

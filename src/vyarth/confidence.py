@@ -30,6 +30,7 @@ _CHECKLIST = (
 )
 _DYNAMIC_MESSAGE = "Dynamic usage detected. Static analysis cannot prove this symbol is unused."
 _DECORATED_NOTE = "Decorated, but not a recognized framework entry."
+_LAMBDA_NOTE = "Only referenced from a lambda this scan did not prove is called."
 _MODULE_CAP_NOTE = "This file has no incoming imports, so this score follows the module."
 _ALEMBIC_NOTE = "Alembic loads this name when the migration runs."
 _PROBE_NOTE = "This import sits in a try that catches ImportError, so it may be an availability check."
@@ -128,6 +129,13 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
         return finding
     if finding.rule not in {"UNUSED_FUNCTION", "UNUSED_CLASS"}:
         return finding
+    if index is not None and qualname in index.lambda_mentions:
+        return replace(
+            finding,
+            status="POSSIBLY_DEAD",
+            confidence=60,
+            evidence=_with_note(finding.evidence, _LAMBDA_NOTE),
+        )
     decorated = index is not None and _unrecognized_decorator(index, qualname)
     if decorated:
         evidence = (
