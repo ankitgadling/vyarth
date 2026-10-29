@@ -170,12 +170,13 @@ def _import_edits(
             continue
         start = node.lineno
         end = node.end_lineno or node.lineno
+        dropped_lines = _removed_alias_lines(node, set(symbols))
         if rendered is None:
             replacement = ""
             removed[node.lineno] = (start, end)
         else:
             indent = lines[start - 1][: len(lines[start - 1]) - len(lines[start - 1].lstrip(" \t"))]
-            comment = _trailing_comment(source, node)
+            comment = _preserved_comments(source, node, dropped_lines)
             line = f"{indent}{rendered}"
             if comment:
                 line = f"{line}  {comment}"
@@ -258,16 +259,37 @@ def _pure_import(source: str, node: ast.Import | ast.ImportFrom) -> bool:
     return True
 
 
-def _trailing_comment(source: str, node: ast.Import | ast.ImportFrom) -> str:
+def _removed_alias_lines(node: ast.Import | ast.ImportFrom, symbols: set[str]) -> set[int]:
+    """Lines whose only imported name is being removed. Comments there go with it."""
+    removed: set[int] = set()
+    kept: set[int] = set()
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        line = alias.lineno or node.lineno
+        if _alias_symbol(node, alias) in symbols:
+            removed.add(line)
+        else:
+            kept.add(line)
+    return removed - kept
+
+
+def _preserved_comments(source: str, node: ast.Import | ast.ImportFrom, dropped_lines: set[int]) -> str:
+    """Comments on lines that still belong to the import, in source order."""
+    start = node.lineno
     end = node.end_lineno or node.lineno
+    found: list[str] = []
     try:
         tokens = tokenize.generate_tokens(StringIO(source).readline)
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return ""
     for token in tokens:
-        if token.type == tokenize.COMMENT and token.start[0] == end:
-            return token.string
-    return ""
+        if token.type != tokenize.COMMENT:
+            continue
+        line = token.start[0]
+        if start <= line <= end and line not in dropped_lines and token.string not in found:
+            found.append(token.string)
+    return "  ".join(found)
 
 
 def _statement_edits(
@@ -286,6 +308,7 @@ def _statement_edits(
         if finding.rule == "UNUSED_VARIABLE" and finding.confidence >= 100 and _nested_name(finding)
     }
     edits: list[tuple[int, int, str, tuple[str, ...]]] = []
+    variable_edits: list[tuple[tuple[int, int, str, tuple[str, ...]], int, str]] = []
     for finding in findings:
         if finding.confidence < 100:
             continue
@@ -296,9 +319,45 @@ def _statement_edits(
             edit = _function_edit(tree, parents, source, finding, relpath, verb)
         elif finding.rule == "UNUSED_VARIABLE" and _nested_name(finding):
             edit = _variable_edit(tree, parents, source, finding, locals_at, relpath, verb)
-        if edit is not None:
-            removed[finding.line] = (edit[0], edit[1])
-            edits.append(edit)
+        if edit is None:
+            continue
+        if finding.rule == "UNUSED_VARIABLE":
+            statement = _statement_at(tree, finding.line)
+            owner = id(_owner(statement, parents)) if statement is not None else id(tree)
+            variable_edits.append((edit, owner, finding.symbol))
+            continue
+        removed[finding.line] = (edit[0], edit[1])
+        edits.append(edit)
+    edited_names: dict[int, set[str]] = {}
+    for _edit, owner, symbol in variable_edits:
+        edited_names.setdefault(owner, set()).add(symbol)
+    pinned: dict[int, set[str]] = {}
+    del_edits: list[tuple[tuple[int, int, str, tuple[str, ...]], set[str], int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Delete):
+            continue
+        names = _plain_delete_names(node)
+        if not names:
+            continue
+        owner = id(_owner(node, parents))
+        edited = edited_names.get(owner, set())
+        if names <= edited and _private_span(node, parents, source):
+            end = node.end_lineno or node.lineno
+            label = " ".join(sorted(names))
+            edit = (node.lineno, end, "", (f"{verb} {relpath}:{node.lineno} {label}",))
+            del_edits.append((edit, names, owner))
+        else:
+            pinned.setdefault(owner, set()).update(names & edited)
+    for edit, owner, symbol in variable_edits:
+        if symbol in pinned.get(owner, ()):
+            continue
+        removed[edit[0]] = (edit[0], edit[1])
+        edits.append(edit)
+    for edit, names, owner in del_edits:
+        if names & pinned.get(owner, set()):
+            continue
+        removed[edit[0]] = (edit[0], edit[1])
+        edits.append(edit)
     return edits
 
 
@@ -432,20 +491,45 @@ def _apply_edits(
     source: str,
     edits: list[tuple[int, int, str, tuple[str, ...]]],
 ) -> tuple[str, list[str]]:
+    # The wider span wins. An unreachable block is removed whole, instead of a
+    # dead assignment inside it leaving the rest of the block behind.
     chosen: list[tuple[int, int, str, tuple[str, ...]]] = []
     occupied: list[tuple[int, int]] = []
-    for start, end, replacement, note in sorted(edits, key=lambda item: (item[0], -item[1]), reverse=True):
+    for start, end, replacement, note in sorted(edits, key=lambda item: (item[0], -(item[1]))):
         if any(not (end < used_start or start > used_end) for used_start, used_end in occupied):
             continue
         occupied.append((start, end))
         chosen.append((start, end, replacement, note))
     lines = source.splitlines(keepends=True)
     notes: list[str] = []
-    for start, end, replacement, note in chosen:
+    applied: list[tuple[str, ...]] = []
+    for start, end, replacement, note in sorted(chosen, key=lambda item: item[0], reverse=True):
         lines = lines[: start - 1] + ([replacement] if replacement else []) + lines[end:]
+        applied.append(note)
+    for note in reversed(applied):
         notes.extend(note)
-    notes.reverse()
     return "".join(lines), notes
+
+
+def _plain_delete_names(node: ast.Delete) -> set[str] | None:
+    """Names in `del a, b`. None when a target is an attribute or subscript."""
+    names: list[str] = []
+    for target in node.targets:
+        found = _target_names(target)
+        if found is None:
+            return None
+        names.extend(found)
+    return set(names)
+
+
+def _owner(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST:
+    """Function, class, or module that binds names for this statement."""
+    current: ast.AST | None = node
+    while current is not None and not isinstance(
+        current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef | ast.Module
+    ):
+        current = parents.get(current)
+    return current if current is not None else node
 
 
 def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:

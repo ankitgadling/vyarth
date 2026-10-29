@@ -286,7 +286,10 @@ def prune_cache(root: Path, live_paths: set[str]) -> None:
             continue
         if _path_to_keep(file, live) is None:
             _unlink(file)
-    _write_manifest(root, kept)
+    try:
+        _write_manifest(root, kept)
+    except OSError:
+        return
 
 
 def _git_prefix(root: Path) -> str:

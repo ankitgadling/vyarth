@@ -759,7 +759,7 @@ def test_overlapping_fix_edits_apply_once(tmp_path):
     apply_fixes(tmp_path, scan(tmp_path).findings)
     text = path.read_text(encoding="utf-8")
     assert "left" not in text
-    assert "def helper" in text
+    assert "def helper" not in text
     assert "return 0" in text
     compile(text, "app.py", "exec")
 
@@ -1665,6 +1665,186 @@ def test_unused_comprehension_target_is_not_reported(tmp_path):
     path = tmp_path / "a.py"
     path.write_text("def f():\n    return [1 for i in range(3)]\n\nf()\n", encoding="utf-8")
     assert not [item for item in scan(path).findings if item.symbol == "i"]
+
+
+def test_branch_imports_keep_both_definitions(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/fast.py": "def thing():\n    return 1\n",
+            "pkg/slow.py": "def thing():\n    return 2\n",
+            "main.py": (
+                "import sys\n"
+                "\n"
+                "if sys.platform == 'win32':\n"
+                "    from pkg.fast import thing\n"
+                "else:\n"
+                "    from pkg.slow import thing\n"
+                "\n"
+                "def main():\n"
+                "    return thing()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    reported = {
+        finding.path
+        for finding in scan(tmp_path).findings
+        if finding.symbol == "thing" and finding.rule == "UNUSED_FUNCTION"
+    }
+    assert reported == set()
+
+
+def test_try_import_fallback_keeps_both_definitions(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/fast.py": "def thing():\n    return 1\n",
+            "pkg/slow.py": "def thing():\n    return 2\n",
+            "main.py": (
+                "try:\n"
+                "    from pkg.fast import thing\n"
+                "except ImportError:\n"
+                "    from pkg.slow import thing\n"
+                "\n"
+                "def main():\n"
+                "    return thing()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    reported = {
+        finding.path
+        for finding in scan(tmp_path).findings
+        if finding.symbol == "thing" and finding.rule == "UNUSED_FUNCTION"
+    }
+    assert reported == set()
+
+
+def test_import_in_another_function_does_not_keep_the_target(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/fast.py": "def thing():\n    return 1\n",
+            "pkg/slow.py": "def thing():\n    return 2\n",
+            "main.py": (
+                "def unused_import():\n"
+                "    from pkg.slow import thing\n"
+                "    return 1\n"
+                "\n"
+                "def main():\n"
+                "    from pkg.fast import thing\n"
+                "    return thing()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    reported = {
+        finding.path
+        for finding in scan(tmp_path).findings
+        if finding.symbol == "thing" and finding.rule == "UNUSED_FUNCTION"
+    }
+    assert reported == {"pkg/slow.py"}
+
+
+def test_unknown_coding_cookie_does_not_abort(tmp_path):
+    (tmp_path / "bad.py").write_bytes(b"# -*- coding: not-a-real-encoding -*-\nvalue = 1\n")
+    (tmp_path / "ok.py").write_text("import os\n", encoding="utf-8")
+    result = scan(tmp_path)
+    assert any(error.path.replace("\\", "/") == "bad.py" for error in result.errors)
+    assert any(item.symbol == "os" for item in result.findings)
+
+
+def test_unwritable_cache_does_not_abort(tmp_path, monkeypatch):
+    write_tree(tmp_path, {"a.py": "x = 1\nprint(x)\n"})
+    scan(tmp_path)
+
+    def fail(path, payload):
+        raise PermissionError(path)
+
+    monkeypatch.setattr("vyarth.incremental._write_json", fail)
+    (tmp_path / "a.py").write_text("import os\n", encoding="utf-8")
+    result = scan(tmp_path)
+    assert any(item.symbol == "os" for item in result.findings)
+
+
+def test_fix_removes_a_deleted_local_with_its_del(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def work():\n"
+        "    value = 1\n"
+        "    del value\n"
+        "    return 0\n"
+        "\n"
+        "def mixed(other):\n"
+        "    value = 1\n"
+        "    del value, other\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    work()\n"
+        "    mixed(1)\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    text = path.read_text(encoding="utf-8")
+    work, mixed = text.split("def mixed", 1)
+    assert "value" not in work
+    assert "value = 1" in mixed
+    assert "del value, other" in mixed
+    compile(text, "app.py", "exec")
+
+
+def test_fix_removes_the_whole_unreachable_block(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def work(flag):\n"
+        "    return 1\n"
+        "    if flag:\n"
+        "        leftover = 2\n"
+        "        print(leftover)\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    work(True)\n",
+        encoding="utf-8",
+    )
+    apply_fixes(tmp_path, scan(tmp_path).findings)
+    text = path.read_text(encoding="utf-8")
+    assert "leftover" not in text
+    assert "if flag" not in text
+    assert "return 1" in text
+    compile(text, "app.py", "exec")
+
+
+def test_fix_keeps_a_comment_on_a_kept_imported_name():
+    source = "from typing import (\n    Any,  # keep me\n    Dict,\n)\nprint(Any)\n"
+    finding = _finding(symbol="Dict", line=3, fingerprint="UNUSED_IMPORT:app.py:Dict")
+    updated, notes = rewrite_source(source, [finding], "app.py")
+    assert "Dict" not in updated
+    assert "# keep me" in updated
+    assert "Any" in updated
+    assert notes == ["fixed app.py:3 Dict"]
+
+
+def test_fix_notes_follow_source_order():
+    source = "from typing import (\n    Dict,\n    List,\n)\n"
+    findings = [
+        _finding(symbol="Dict", line=2, fingerprint="UNUSED_IMPORT:app.py:Dict"),
+        _finding(symbol="List", line=3, fingerprint="UNUSED_IMPORT:app.py:List"),
+    ]
+    updated, notes = rewrite_source(source, findings, "app.py")
+    assert "Dict" not in updated
+    assert "List" not in updated
+    assert notes == ["fixed app.py:2 Dict", "fixed app.py:3 List"]
 
 
 def test_ignore_bases_covers_a_class_nested_in_a_function(tmp_path):
