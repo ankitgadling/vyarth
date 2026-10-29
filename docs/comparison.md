@@ -93,6 +93,8 @@ Nine of Flask’s unused-dependency findings score 95. Several of those names, i
 
 ## Public names, rescored
 
+This section measures the first version of the change, which scored every public name at 60. A later change scores a public name at 60 only in a library or when `__init__.py` or `__all__` exposes it, so an application keeps 96 on a dead public helper. The counts below are from the first version.
+
 The counts above are from 8 October 2026. On 23 October 2026 the same Flask commit (`d086db856be187255b8ec61ef409357393020f32`, 83 Python files) was scanned again with the scorer before and after public names moved to 60. Both runs used `vyarth scan . --min-confidence 0 --no-cache`. The “before” tree is the repository at `3252085`, which already differed slightly from the October counts.
 
 | | Before | After |

@@ -465,12 +465,12 @@ def test_unreferenced_method_and_class_attribute_score_96(tmp_path):
     )
     findings = {finding.symbol: finding for finding in scan(tmp_path).findings}
     assert findings["close"].rule == "UNUSED_FUNCTION"
-    assert findings["close"].confidence == 60
+    assert findings["close"].confidence == 96
     assert findings["_close"].confidence == 96
     assert findings["quiet"].rule == "UNUSED_FUNCTION"
-    assert findings["quiet"].confidence == 60
+    assert findings["quiet"].confidence == 96
     assert findings["LIMIT"].rule == "UNUSED_VARIABLE"
-    assert findings["LIMIT"].confidence == 60
+    assert findings["LIMIT"].confidence == 96
     assert "label" not in findings
 
 
@@ -526,7 +526,7 @@ def test_referenced_method_outside_the_entry_stays_an_orphan(tmp_path):
     )
     findings = {finding.symbol: finding for finding in scan(tmp_path).findings}
     assert findings["unused"].rule == "UNUSED_FUNCTION"
-    assert findings["unused"].confidence == 60
+    assert findings["unused"].confidence == 96
     assert findings["close"].rule == "ORPHAN_FUNCTION"
     assert findings["close"].confidence == 80
 
@@ -1328,8 +1328,7 @@ def test_external_base_methods_score_60(tmp_path):
     assert findings["default"].confidence == 60
     assert "external base" in findings["default"].evidence[-1]
     assert findings["run"].confidence == 60
-    assert findings["close"].confidence == 60
-    assert "Public name" in findings["close"].evidence[-1]
+    assert findings["close"].confidence == 96
     assert findings["_shut"].confidence == 96
 
 
@@ -1440,11 +1439,8 @@ def test_project_class_bases_stay_96(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_FUNCTION"}
-    assert findings["extra"].confidence == 60
-    assert findings["other"].confidence == 60
-    assert findings["seal"].confidence == 60
-    assert findings["keep"].confidence == 60
-    assert findings["_keep"].confidence == 96
+    for name in ("extra", "other", "seal", "keep", "_keep"):
+        assert findings[name].confidence == 96
     assert findings["pack"].confidence == 60
 
 

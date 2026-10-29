@@ -79,9 +79,6 @@ _TOOLING = frozenset(
         "yapf",
         "sphinx",
         "mkdocs",
-        "celery",
-        "alembic",
-        "supervisor",
     }
 )
 _TOOLING_PREFIXES = ("pytest-", "flake8-", "types-", "mypy-", "pylint-", "sphinx-", "mkdocs-", "django-stubs")

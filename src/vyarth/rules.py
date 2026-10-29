@@ -13,14 +13,16 @@ from vyarth.flow import apply_flow
 from vyarth.graph import (
     class_attribute_findings,
     import_hops,
+    PublicSurface,
     orphan_findings,
+    public_surface,
     reachable_modules,
     reachable_symbols,
     reexported_symbol,
     subclass_registry_symbols,
     wildcard_references,
 )
-from vyarth.model import Binding, FileIndex, Finding, ImportEdge, make_fingerprint
+from vyarth.model import PUBLIC_NAME_NOTE, Binding, FileIndex, Finding, ImportEdge, make_fingerprint
 from vyarth.progress import ScanProgress
 from vyarth.project import Project, build_project, rebind
 
@@ -64,19 +66,44 @@ def collect_findings(
     referenced |= import_hops(project)
     referenced |= subclass_registry_symbols(project)
     referenced |= set(entries.symbols)
+    surface = public_surface(project, entries)
     for index in project.indexes:
         relpath = relative_posix(Path(index.path), project.root)
-        findings.extend(_symbol_findings(index, relpath, referenced, entries, reached))
+        symbol_findings = _symbol_findings(index, relpath, referenced, entries, reached)
+        findings.extend(_public_name(item, index.path, surface) for item in symbol_findings)
         findings.extend(_wildcard_findings(index, relpath))
         findings.extend(_unreachable_findings(index, relpath))
-    findings.extend(orphan_findings(project, entries, referenced, exported, reached, unresolved, progress))
-    findings.extend(class_attribute_findings(project, referenced, reached, unresolved, progress))
+    findings.extend(orphan_findings(project, entries, referenced, exported, reached, unresolved, surface, progress))
+    findings.extend(class_attribute_findings(project, referenced, reached, unresolved, surface, progress))
     if check_modules:
         _status(progress, "checking modules")
         findings.extend(_module_findings(project, entries, config))
     if not entries.symbols and not entries.modules:
         findings = [_without_entries(item) for item in findings]
     return findings
+
+
+def _public_name(finding: Finding, path: str, surface: PublicSurface) -> Finding:
+    """An unused public module-level name is only a maybe when outside code may load it."""
+    if finding.rule not in {"UNUSED_FUNCTION", "UNUSED_CLASS", "UNUSED_VARIABLE"}:
+        return finding
+    prefix = f"{finding.rule}:{finding.path}:"
+    if not finding.fingerprint.startswith(prefix):
+        return finding
+    qualname = finding.fingerprint[len(prefix) :]
+    if "." in qualname or finding.symbol.startswith("_"):
+        return finding
+    if not surface.covers(path, qualname):
+        if finding.rule == "UNUSED_VARIABLE":
+            # Outside code cannot load it, but another file in the project still might.
+            return replace(finding, status="POSSIBLY_DEAD", confidence=96)
+        return finding
+    return replace(
+        finding,
+        status="POSSIBLY_DEAD",
+        confidence=60,
+        evidence=finding.evidence + (PUBLIC_NAME_NOTE,),
+    )
 
 
 _NO_ENTRY_NOTE = "This scan found no entry point, so this may be a library whose callers are outside the scan."

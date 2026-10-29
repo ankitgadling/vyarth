@@ -7,6 +7,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import re
 
 from vyarth.baseline import filter_baselined, load_baseline
 from vyarth.confidence import apply_confidence
@@ -16,11 +17,13 @@ from vyarth.discover import discover_scan, is_test_path, project_root, read_pyth
 from vyarth.duplicates import duplicate_findings
 from vyarth.ignore import apply_ignores
 from vyarth.incremental import (
+    CacheEntry,
     cache_stamp,
     changed_python_files,
     load_cached,
     load_result,
     prune_cache,
+    remember_cached,
     result_cache_key,
     store_cached,
     store_result,
@@ -120,7 +123,7 @@ def scan(
         overlays,
         progress,
     )
-    had_parse_errors = bool(errors)
+    broken_names = _broken_names(root, errors)
 
     # A nested folder that is not a package becomes a root, so `scan examples/app`
     # resolves `import app`. A directory with `__init__.py` keeps its own name.
@@ -149,10 +152,10 @@ def scan(
     _status(progress, "checking duplicate code")
     findings.extend(duplicate_findings(indexes, root, config.duplicate_min_statements))
     findings = apply_confidence(findings, indexes, root)
-    if had_parse_errors:
-        findings = [_soften_for_parse_errors(finding) for finding in findings]
-    findings = [finding for finding in findings if not is_test_path(finding.path)]
     by_path = {relative_posix(Path(index.path), root): index for index in indexes}
+    if broken_names is None or broken_names:
+        findings = [_soften_for_parse_errors(item, broken_names, by_path) for item in findings]
+    findings = [finding for finding in findings if not is_test_path(finding.path)]
     findings = apply_ignores(findings, by_path, config)
     if cache_result:
         store_result(root, result_key, findings, errors, len(indexes))
@@ -181,14 +184,39 @@ _PARSE_SENSITIVE = {
 }
 
 
-def _soften_for_parse_errors(finding: Finding) -> Finding:
-    """A file that did not parse could hold any import or call, so cross-file claims drop to maybe."""
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _broken_names(root: Path, errors: list[ParseError]) -> set[str] | None:
+    """Lowercased words in the source files that failed to parse.
+
+    A broken test file, which is often broken on purpose, is ignored. None means
+    a broken file could not be read, so its contents are unknown.
+    """
+    words: set[str] = set()
+    for error in errors:
+        if is_test_path(error.path):
+            continue
+        try:
+            text, _ = read_python_source(root / error.path)
+        except (OSError, UnicodeDecodeError):
+            return None
+        words.update(word.lower() for word in _WORD.findall(text))
+    return words
+
+
+def _soften_for_parse_errors(
+    finding: Finding,
+    broken: set[str] | None,
+    by_path: dict[str, FileIndex],
+) -> Finding:
+    """Drop a claim to 70 only when a file that failed to parse mentions the name it rests on."""
     if finding.rule not in _PARSE_SENSITIVE or finding.confidence <= 70:
         return finding
-    if finding.rule == "UNUSED_VARIABLE" and finding.fingerprint.count(":") > 2:
-        qualname = finding.fingerprint.split(":", 2)[2]
-        if "." in qualname:
-            return finding
+    if _is_local(finding, by_path):
+        return finding
+    if broken is not None and not _mentioned(finding, broken, by_path):
+        return finding
     status = "POSSIBLY_DEAD" if finding.status == "DEAD" else finding.status
     return replace(
         finding,
@@ -196,6 +224,31 @@ def _soften_for_parse_errors(finding: Finding) -> Finding:
         status=status,
         evidence=finding.evidence + (_PARSE_ERROR_NOTE,),
     )
+
+
+def _mentioned(finding: Finding, broken: set[str], by_path: dict[str, FileIndex]) -> bool:
+    if finding.rule == "UNUSED_DEPENDENCY":
+        name = finding.symbol.lower()
+        return bool({name, name.replace("-", "_"), name.replace("-", "")} & broken) or any(
+            part in broken for part in name.split("-") if len(part) > 2
+        )
+    if finding.rule == "POSSIBLY_UNUSED_MODULE":
+        parts = Path(finding.path).with_suffix("").parts
+        return any(part.lower() in broken for part in parts if part != "__init__")
+    prefix = f"{finding.rule}:{finding.path}:"
+    if not finding.fingerprint.startswith(prefix):
+        return True
+    return finding.symbol.lower() in broken
+
+
+def _is_local(finding: Finding, by_path: dict[str, FileIndex]) -> bool:
+    """A name bound inside a function cannot be imported by another file."""
+    prefix = f"{finding.rule}:{finding.path}:"
+    index = by_path.get(finding.path)
+    if index is None or not finding.fingerprint.startswith(prefix):
+        return False
+    qualname = finding.fingerprint[len(prefix) :]
+    return any(item.qualname == qualname and item.scope_kind == "function" for item in index.bindings)
 
 
 def _finish(
@@ -262,6 +315,7 @@ def _index_files(
 ) -> tuple[list[FileIndex], list[ParseError]]:
     indexes: list[FileIndex] = []
     errors: list[ParseError] = []
+    queued: list[CacheEntry] = []
     pending: list[tuple[str, str, str | None, str, bool]] = []
     fold_pairs = tuple(sorted(fold.items()))
     total = len(files)
@@ -278,7 +332,7 @@ def _index_files(
                 current = str(file)
                 if cached.path != current:
                     cached = replace(cached, path=current)
-                    store_cached(root, relpath, stamp, cached)
+                    store_cached(root, relpath, stamp, cached, queued)
                 indexes.append(cached)
                 cached_count += 1
                 _status(progress, "indexing files", _index_detail(cached_count, total, cached_count))
@@ -315,7 +369,8 @@ def _index_files(
         if isinstance(payload, FileIndex):
             indexes.append(payload)
             if use_cache and stamp and not overlaid:
-                store_cached(root, relpath, stamp, payload)
+                store_cached(root, relpath, stamp, payload, queued)
+    remember_cached(root, queued)
     return indexes, errors
 
 

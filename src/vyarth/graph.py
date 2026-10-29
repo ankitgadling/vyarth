@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pathspec
 
 from vyarth.config import Config
-from vyarth.discover import relative_posix
+from vyarth.discover import is_test_path, relative_posix
 from vyarth.entries import EntrySet
 from vyarth.flow import container_targets, held_elements, _module_function, _module_named
 from vyarth.model import PUBLIC_NAME_NOTE, Binding, CallEdge, FileIndex, Finding, is_private_name, make_fingerprint
@@ -35,6 +36,73 @@ _FIELD_NAMES = {
     "attrs.frozen",
     "attrs.mutable",
 }
+
+
+@dataclass(frozen=True)
+class PublicSurface:
+    """Where an unused public name may still be called from outside the scan.
+
+    A project with no application entry point is a library, so every public name
+    is part of its API. Otherwise only names a package `__init__.py` or an
+    `__all__` list exposes are.
+    """
+
+    library: bool = False
+    api: frozenset[tuple[str, str]] = frozenset()
+
+    def covers(self, path: str, qualname: str) -> bool:
+        if self.library:
+            return True
+        parts = qualname.split(".")
+        return any((path, ".".join(parts[:count])) in self.api for count in range(1, len(parts) + 1))
+
+
+def public_surface(project: Project, entries: EntrySet) -> PublicSurface:
+    api: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        for name in index.exports:
+            exported = project.module_binding(index.path, name)
+            if exported is not None:
+                api.add((index.path, exported.qualname))
+        if Path(index.path).name != "__init__.py":
+            continue
+        for binding in index.bindings:
+            if binding.scope_kind != "module":
+                continue
+            if binding.kind == "import":
+                target = _follow_imports(project, index.path, binding.qualname)
+                if target[1] in project.bindings.get(target[0], {}) and target != (index.path, binding.qualname):
+                    api.add(target)
+            elif not is_private_name(binding.name):
+                api.add((index.path, binding.qualname))
+        for edge in index.imports:
+            if not edge.is_wildcard:
+                continue
+            module = project.resolve_import(edge.module, edge.level, index.path)
+            source = project.by_module.get(module) if module else None
+            if source is None:
+                continue
+            for binding in source.bindings:
+                if binding.scope_kind != "module" or binding.kind == "import":
+                    continue
+                if source.exports:
+                    visible = binding.name in source.exports
+                else:
+                    visible = not is_private_name(binding.name)
+                if visible:
+                    api.add((source.path, binding.qualname))
+    return PublicSurface(library=not _has_app_entry(project, entries), api=frozenset(api))
+
+
+def _has_app_entry(project: Project, entries: EntrySet) -> bool:
+    for path, _qualname in entries.symbols:
+        if not is_test_path(relative_posix(Path(path), project.root)):
+            return True
+    for name in entries.modules:
+        index = project.by_module.get(name)
+        if index is not None and not is_test_path(relative_posix(Path(index.path), project.root)):
+            return True
+    return False
 
 
 def reachable_modules(project: Project, entries: EntrySet, config: Config) -> set[str]:
@@ -85,6 +153,7 @@ def orphan_findings(
     exported: set[tuple[str, str]],
     reachable: set[tuple[str, str]],
     unresolved: set[str],
+    surface: PublicSurface,
     progress: ScanProgress | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
@@ -139,7 +208,7 @@ def orphan_findings(
                         )
                     )
                     continue
-                private = is_private_name(binding.name)
+                maybe_api = not is_private_name(binding.name) and surface.covers(index.path, binding.qualname)
                 findings.append(
                     Finding(
                         rule="UNUSED_FUNCTION",
@@ -148,9 +217,9 @@ def orphan_findings(
                         column=binding.column,
                         symbol=binding.name,
                         status="POSSIBLY_DEAD",
-                        confidence=96 if private else 60,
+                        confidence=60 if maybe_api else 96,
                         message=_METHOD_MESSAGE.format(name=binding.name),
-                        evidence=("No references found.",) if private else ("No references found.", PUBLIC_NAME_NOTE),
+                        evidence=("No references found.", PUBLIC_NAME_NOTE) if maybe_api else ("No references found.",),
                         fingerprint=make_fingerprint("UNUSED_FUNCTION", relpath, binding.qualname),
                     )
                 )
@@ -167,6 +236,7 @@ def class_attribute_findings(
     referenced: set[tuple[str, str]],
     reachable: set[tuple[str, str]],
     unresolved: set[str],
+    surface: PublicSurface,
     progress: ScanProgress | None = None,
 ) -> list[Finding]:
     """Class attributes nobody loads. Dataclass and attrs fields stay quiet."""
@@ -197,19 +267,24 @@ def class_attribute_findings(
                 # One class defines this name and an attribute with that name is loaded
                 # on a receiver of unknown type.
                 continue
+            confidence: int
+            evidence: tuple[str, ...]
             if binding.name in unresolved:
                 confidence = 60
                 evidence = (_UNRESOLVED_NOTE,)
-            elif _has_external_base(project, index, class_name):
-                # A framework base may read this name by reflection.
-                confidence = 60
-                evidence = ("No references found.", _EXTERNAL_BASE_NOTE)
             elif is_private_name(binding.name):
                 confidence = 96
                 evidence = ("No references found.",)
-            else:
+            elif _has_external_base(project, index, class_name):
+                # A framework base may read a public name by reflection.
+                confidence = 60
+                evidence = ("No references found.", _EXTERNAL_BASE_NOTE)
+            elif surface.covers(index.path, binding.qualname):
                 confidence = 60
                 evidence = ("No references found.", PUBLIC_NAME_NOTE)
+            else:
+                confidence = 96
+                evidence = ("No references found.",)
             findings.append(
                 Finding(
                     rule="UNUSED_VARIABLE",
@@ -464,7 +539,7 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
             add(index.path, call.callee)
             return
         if call.resolved and call.callee:
-            if not _add_call_target(project, index.path, call, add) and call.kind == "method":
+            if not _add_call_target(project, index.path, call, add, _marker) and call.kind == "method":
                 add_dangling(index.path, call)
             return
         if call.kind == "name" and call.callee_name:
@@ -487,6 +562,13 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
             if len(matches) == 1 or (len(matches) > 1 and _share_a_base(project, matches)):
                 for match in matches:
                     add(*match)
+
+    def add_dunders() -> None:
+        """The interpreter calls `__enter__`, `__call__`, `__iter__` and the like on a used class."""
+        for key in referenced_classes(project, reachable):
+            for name, qualname in project.methods_by_class.get(key, ()):
+                if name.startswith("__") and name.endswith("__"):
+                    add(key[0], qualname)
 
     def add_properties() -> None:
         """Walk `@property` bodies on a used class so calls inside them count."""
@@ -563,6 +645,7 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
                 consider(index, call)
         before = len(reachable)
         add_unique_methods()
+        add_dunders()
         add_properties()
         add_visitors()
         if len(reachable) != before:
@@ -580,11 +663,14 @@ def referenced_classes(project: Project, reachable: set[tuple[str, str]]) -> set
     return found
 
 
-def _add_call_target(project: Project, path: str, call: CallEdge, add) -> bool:
+def _add_call_target(project: Project, path: str, call: CallEdge, add, resolve) -> bool:
     found = add(path, call.callee)
-    binding = project.bindings.get(path, {}).get(call.callee)
-    if binding is not None and binding.kind == "class":
-        add(path, f"{binding.qualname}.__init__")
+    # The callee may be an import of a class from another file. Constructing it
+    # runs that class's `__init__`, so resolve the import before looking.
+    target = resolve(path, call.callee)
+    binding = project.bindings.get(target[0], {}).get(target[1]) if target is not None else None
+    if target is not None and binding is not None and binding.kind == "class":
+        add(target[0], f"{target[1]}.__init__")
     if call.kind == "method" and call.callee_name in _VISITOR_CALLS and "." in call.callee:
         class_name = call.callee.rsplit(".", 1)[0]
         for qualname in project.visitors.get((path, class_name), ()):
@@ -832,15 +918,11 @@ def _field_class(index: FileIndex, qualname: str) -> bool:
             continue
         if item.name in _FIELD_NAMES or item.name.rsplit(".", 1)[-1] in _FIELD_DECORATORS:
             return True
-    for class_name, bases in index.class_bases:
-        if class_name != qualname:
-            continue
-        for base in bases:
-            if _base_leaf(base) in {"BaseModel", "DeclarativeBase"}:
-                return True
     return False
 
 
+# These two have always matched by name, even for a class defined in the project.
+_NAMED_FIELD_BASES = {"BaseModel", "DeclarativeBase"}
 _DECLARATIVE_BASES = {
     "BaseModel",
     "BaseSettings",
@@ -872,10 +954,14 @@ def _declarative_class(project: Project, index: FileIndex, qualname: str, _seen:
         if class_name != qualname:
             continue
         for base in bases:
-            if _base_leaf(base) in _DECLARATIVE_BASES:
+            if _base_leaf(base) in _NAMED_FIELD_BASES:
                 return True
             resolved = _project_base(project, index, base)
             if resolved is None:
+                # Only a base from outside the project can be a framework class.
+                # A project class that happens to be named `Model` is not one.
+                if _base_leaf(base) in _DECLARATIVE_BASES:
+                    return True
                 continue
             owner = project.by_path.get(resolved[0])
             if owner is not None and _declarative_class(project, owner, resolved[1], _seen | {key}):

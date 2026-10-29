@@ -11,7 +11,7 @@ def test_unused_module_caps_a_function(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings}
-    assert findings["helper"].confidence == 60
+    assert findings["helper"].confidence == 82
     assert findings["_helper"].confidence == 82
     assert "no incoming imports" in findings["_helper"].evidence[-1]
 
@@ -38,8 +38,7 @@ def test_reached_module_keeps_a_high_function_score(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings}
-    assert findings["helper"].confidence == 60
-    assert "Public name" in findings["helper"].evidence[-1]
+    assert findings["helper"].confidence == 96
     assert findings["_helper"].confidence == 96
     assert "no incoming imports" not in " ".join(findings["_helper"].evidence)
 
@@ -96,7 +95,7 @@ def test_alembic_names_score_70_and_stay_reported(tmp_path):
     )
     findings = [item for item in scan(tmp_path).findings if item.symbol == "upgrade"]
     assert len(findings) == 1
-    assert findings[0].confidence == 60
+    assert findings[0].confidence == 70
     assert "Alembic loads this name" in findings[0].evidence[-1]
 
 

@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from vyarth.discover import relative_posix
-from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding, is_private_name
+from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding
 
 
 _NEUTRAL_DECORATORS = {
@@ -119,13 +119,6 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
             evidence=(_DYNAMIC_MESSAGE,),
         )
     if finding.rule == "UNUSED_VARIABLE":
-        if "." not in qualname and not is_private_name(finding.symbol):
-            return replace(
-                finding,
-                status="POSSIBLY_DEAD",
-                confidence=60,
-                evidence=_with_note(finding.evidence, PUBLIC_NAME_NOTE),
-            )
         return finding
     if finding.rule not in {"UNUSED_FUNCTION", "UNUSED_CLASS"}:
         return finding
@@ -148,13 +141,13 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
         return replace(finding, status="POSSIBLY_DEAD", confidence=min(finding.confidence, 75), evidence=evidence)
     if "." in qualname:
         return finding
-    if is_private_name(finding.symbol):
-        return replace(finding, status="POSSIBLY_DEAD", confidence=96, evidence=_CHECKLIST)
+    # Rules already scored a public name that outside code may load at 60.
+    checklist = _with_note(_CHECKLIST, PUBLIC_NAME_NOTE) if PUBLIC_NAME_NOTE in finding.evidence else _CHECKLIST
     return replace(
         finding,
         status="POSSIBLY_DEAD",
-        confidence=60,
-        evidence=_with_note(_CHECKLIST, PUBLIC_NAME_NOTE),
+        confidence=min(finding.confidence, 96),
+        evidence=checklist,
     )
 
 

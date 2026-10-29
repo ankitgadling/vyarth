@@ -92,7 +92,6 @@ def test_min_confidence_filters_possible_modules(tmp_path):
     rules = {finding.rule for finding in high.findings}
     symbols = {finding.symbol for finding in high.findings}
     assert "_unused" in symbols
-    assert "unused" not in symbols
     assert "UNUSED_FUNCTION" in rules
     assert "POSSIBLY_UNUSED_MODULE" not in rules
 

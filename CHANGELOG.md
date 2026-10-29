@@ -9,15 +9,17 @@
   - A method called on a receiver of unknown type reaches the method when one class owns that name or when its owners share a base. A call on a base class that does not define the method reaches subclass overrides. `type(self).x`, `self.__class__.x`, and `self.x += 1` read the attribute.
   - Names built with `getattr(obj, "prefix_" + x)`, `globals()`, and `getattr(self, name)` lower the matching findings to 70.
   - Subclasses of a class with `__init_subclass__` count as used. A name re-exported through `from .core import *` is found, and `pkg.thing()` marks the import in `pkg/__init__.py` as used.
-  - Fields on classes that inherit from a declarative base through project classes are not reported. A class attribute under an external base scores at most 60.
+  - Fields on classes that inherit from a declarative base through project classes are not reported. A project class that merely shares a name such as `Model` is not a declarative base. A class attribute under an external base scores at most 60.
   - Reads every entry-point group, `[tool.poetry.scripts]`, `setup.cfg`, and `setup.py`. Treats `noxfile.py`, `fabfile.py`, `tasks.py`, `alembic/env.py`, `scripts/`, and `bin/` as entries, and `test/`, `testing/`, and `tests.py` as tests. A top-level folder that holds packages, such as `backend/app/`, is an import root.
-  - Orphan functions score 60 when the scan finds no entry point. A file that fails to parse caps cross-file findings at 70.
-  - Build tools, linters, type stubs, and packages named in a source string score 70 as unused dependencies instead of 95.
+  - Orphan functions score 60 when the scan finds no entry point. A file that fails to parse lowers to 70 only the cross-file findings whose name it mentions. Local variables and findings it never names keep their score. Parse errors in test files are ignored.
+  - Build tools, linters, type stubs, and packages named in a source string score 70 as unused dependencies instead of 95. celery, lembic, and supervisor are runtime libraries and keep 95.
+- A manifest change to `setup.cfg` now invalidates the cached result. The per-file cache manifest is written once per scan instead of once per file.
+- A base-class method called through `self` from a subclass `__init__` or dunder in another module is no longer reported.
 - The index format changed. Cached indexes from an earlier version are rebuilt on the next scan.
 - A quoted name inside `Callable[["Name"], Any]`, including the value of a `TypeAlias`, counts as a use of that name.
 - Confidence 100 is only a name or statement that is unused and safe to delete.
 - An unchanged directory scan reuses the previous finding list. Dependency manifests are collected during file discovery, and cache pruning reads a sidecar instead of every index.
-- Scores a public unused function, class, method, attribute, or module-level variable at 60%. A private name stays at 96%, or 100% for a private module-level variable. `--fail-on high` no longer fails on a library's public surface.
+- Scores an unused public name at 60% only when it can be API: the scan is a library (no entry point), or `__init__.py` or `__all__` exposes it. In an application with an entry point, a dead public function, class, method, or attribute stays at 96%, so `--fail-on high` still fails on it. A dead public module-level variable is 96% there, not 100%. Private names keep 96%, or 100% for a private module-level variable.
 - Scores duplicate function bodies at 80%, so they stay out of `--fail-on high`.
 - A scan of the project root no longer treats manifests under `examples/`, `tutorial/`, `samples/`, `demo/`, or `benchmarks/` as project dependencies. Nested package manifests still count. Scanning that directory reports its own manifest.
 - Counts `from module import Name as Name` as a public re-export, follows an attribute on an imported submodule, and reads a quoted name inside `Union`, `Optional`, the first argument of `Annotated`, and a `|` expression.

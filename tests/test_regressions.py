@@ -415,7 +415,7 @@ def test_unchanged_scan_reuses_findings_without_parsing(tmp_path, monkeypatch):
     assert second.findings == first.findings
     assert second.errors == first.errors
     assert second.files_scanned == first.files_scanned
-    assert {item.symbol: item.confidence for item in second.findings} == {"public": 60, "_private": 96}
+    assert {item.symbol: item.confidence for item in second.findings} == {"public": 96, "_private": 96}
     assert all(item.evidence for item in second.findings)
 
 
@@ -493,8 +493,9 @@ def test_cached_scan_replays_confidence_baseline_and_changed(tmp_path, monkeypat
     baseline = tmp_path / "baseline.json"
     write_baseline(baseline, [item for item in first.findings if item.path == "b.py"])
     _forbid_reparse(monkeypatch)
-    narrowed = scan(tmp_path, min_confidence=90)
-    assert {item.symbol for item in narrowed.findings} == {"_private"}
+    assert {item.symbol for item in scan(tmp_path, min_confidence=90).findings} == {"public", "_private", "other"}
+    narrowed = scan(tmp_path, min_confidence=97)
+    assert not narrowed.findings
     assert narrowed.files_scanned == first.files_scanned
     baselined = scan(tmp_path, baseline=baseline)
     assert not any(item.path == "b.py" for item in baselined.findings)

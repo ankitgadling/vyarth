@@ -26,7 +26,7 @@ A module is an entry when any of these is true:
 
 - its path matches an entry pattern (`**/__main__.py`, `**/wsgi.py`, `**/asgi.py`, `**/manage.py`, `setup.py`, `**/docs/conf.py`, `noxfile.py`, `fabfile.py`, `tasks.py`, `**/gunicorn.conf.py`, `**/alembic/env.py`, `scripts/**/*.py`, `bin/**/*.py`, unless you replace the list)
 - it contains `if __name__ == "__main__":`
-- it is a test module, including `conftest.py`, `tests.py`, and anything under `tests/`, `test/`, or `testing/`
+- it is a test module, including `conftest.py`, `tests.py`, and anything under `tests/` or a top-level `test/`
 - `[project.scripts]`, `[project.gui-scripts]`, any `[project.entry-points]` group, `[tool.poetry.scripts]`, `[tool.poetry.plugins]`, `setup.cfg` `[options.entry_points]`, or `entry_points` in `setup.py` names it
 - `entry_points` in config names it
 - `frameworks` includes `django` and the path is `settings.py`, `admin.py`, `apps.py`, `urls.py`, or a file under `migrations/`
@@ -72,9 +72,9 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Situation | Score |
 | --- | --- |
 | Private module-level function or class with no references | 96 |
-| Public module-level function, class, or variable with no references | 60 |
-| Unreferenced method on a used class | 96 when the name is private, or 60 when it is public or the class has a base outside the project |
-| Unreferenced attribute on a used class | 96 when the name is private, or 60 when it is public |
+| Public module-level function, class, or variable with no references | 96, or 60 when the project has no entry point or the name is exposed by an `__init__.py` or `__all__` |
+| Unreferenced method on a used class | 96, or 60 when the name is public API or the class has a base outside the project |
+| Unreferenced attribute on a used class | 96, or 60 when it is public API or the class has a base outside the project |
 | Decorated, and the decorator is not an entry | 75 |
 | The name appears as a string in `getattr`, `setattr`, `eval`, or `exec` | 70 |
 | The file calls `importlib` or `__import__` | unused imports in that file drop to 70 |

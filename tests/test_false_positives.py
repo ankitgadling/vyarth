@@ -365,18 +365,18 @@ def test_declarative_subclasses_keep_their_fields(tmp_path):
     assert not found
 
 
-def test_private_class_attribute_on_a_framework_base_is_only_possible(tmp_path):
+def test_public_class_attribute_on_a_framework_base_is_only_possible(tmp_path):
     source = """
     import threading
 
     class Worker(threading.Thread):
-        _hidden = 1
+        visible = 1
 
     def main():
         Worker()
     """
     found = findings_for(tmp_path, {"app.py": source + MAIN})
-    hidden = [item for item in found if item.symbol == "_hidden"]
+    hidden = [item for item in found if item.symbol == "visible"]
     assert hidden and all(item.confidence < 90 for item in hidden)
 
 
@@ -457,15 +457,178 @@ def test_library_without_entry_points_is_not_a_confident_orphan(tmp_path):
     assert all(item.confidence <= 60 for item in orphans)
 
 
-def test_parse_error_softens_cross_file_claims(tmp_path):
+def test_parse_error_softens_a_name_the_broken_file_mentions(tmp_path):
     files = {
-        "broken.py": "def x(:\n",
+        "broken.py": "from util import _private\ndef x(:\n",
         "util.py": "def _private():\n    return 1\n",
         "main.py": "import util\n\ndef main():\n    return util\n" + MAIN,
     }
     found = findings_for(tmp_path, files)
     private = [item for item in found if item.symbol == "_private"]
     assert private and all(item.confidence < 90 for item in private)
+
+
+def test_parse_error_leaves_unrelated_and_local_findings_alone(tmp_path):
+    files = {
+        "broken.py": "def x(:\n",
+        "util.py": "def _private():\n    return 1\n",
+        "main.py": (
+            "import util\n\ndef main():\n    unused_local = 1\n    return util\n" + MAIN
+        ),
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["_private"].confidence == 96
+    assert found["unused_local"].confidence == 100
+
+
+def test_parse_error_in_a_test_file_changes_nothing(tmp_path):
+    files = {
+        "tests/data/broken.py": "from util import _private\ndef x(:\n",
+        "util.py": "def _private():\n    return 1\n",
+        "main.py": "import util\n\ndef main():\n    return util\n" + MAIN,
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["_private"].confidence == 96
+
+
+# --- scoring of public names ---
+
+
+def test_dead_public_helper_in_an_application_stays_high(tmp_path):
+    files = {
+        "app.py": "def dead_helper():\n    return 1\n\ndef main():\n    return 2\n" + MAIN,
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["dead_helper"].confidence == 96
+
+
+def test_public_name_in_a_library_is_only_possible(tmp_path):
+    files = {"lib.py": "def public_api():\n    return 1\n"}
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["public_api"].confidence == 60
+
+
+def test_name_exposed_by_init_is_only_possible_in_an_application(tmp_path):
+    files = {
+        "pkg/__init__.py": "from .core import exposed\n",
+        "pkg/core.py": "def exposed():\n    return 1\n\ndef internal():\n    return 2\n",
+        "main.py": "import pkg\n\ndef main():\n    return pkg\n" + MAIN,
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["exposed"].confidence == 60
+    assert found["internal"].confidence == 96
+
+
+def test_dead_public_module_variable_in_an_application_is_not_certain(tmp_path):
+    files = {"app.py": "SPARE = 1\n\ndef main():\n    return 2\n" + MAIN}
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["SPARE"].confidence == 96
+
+
+# --- cache inputs ---
+
+
+def test_setup_cfg_entry_point_invalidates_the_cached_result(tmp_path):
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/cli.py": "def main():\n    return 1\n",
+        "main.py": "import pkg.cli\n\ndef run():\n    return pkg.cli\n" + MAIN.replace("main()", "run()"),
+    }
+    write_tree(tmp_path, {name: _clean(text) for name, text in files.items()})
+    first = scan(tmp_path)
+    assert "main" in {item.symbol for item in first.findings}
+    (tmp_path / "setup.cfg").write_text(
+        "[options.entry_points]\nconsole_scripts =\n    x = pkg.cli:main\n", encoding="utf-8"
+    )
+    second = scan(tmp_path)
+    assert "main" not in {item.symbol for item in second.findings}
+
+
+# --- class names that only look like framework bases ---
+
+
+def test_project_class_named_model_is_not_a_declarative_base(tmp_path):
+    source = """
+    class Model:
+        pass
+
+    class User(Model):
+        _secret = 1
+        label = 2
+
+    def main():
+        return User()
+    """
+    found = {item.symbol: item for item in findings_for(tmp_path, {"app.py": source + MAIN})}
+    assert found["_secret"].confidence == 96
+    assert found["label"].confidence == 96
+
+
+def test_framework_model_base_from_a_package_keeps_fields_quiet(tmp_path):
+    source = """
+    from django.db import models
+
+    class Article(models.Model):
+        title = 1
+
+    def main():
+        return Article()
+    """
+    assert "title" not in symbols(tmp_path, {"app.py": source + MAIN})
+
+
+# --- test directories ---
+
+
+def test_shipped_testing_package_is_not_treated_as_tests(tmp_path):
+    files = {
+        "myapp/__init__.py": "",
+        "myapp/testing/__init__.py": "",
+        "myapp/testing/helpers.py": "def _dead_helper():\n    return 1\n",
+        "main.py": "import myapp.testing.helpers\n\ndef main():\n    return myapp\n" + MAIN,
+    }
+    assert "_dead_helper" in symbols(tmp_path, files)
+
+
+# --- base-class methods reached through self ---
+
+
+def test_base_method_called_through_self_in_another_module(tmp_path):
+    files = {
+        "pkg/__init__.py": "from ._client import Client\n",
+        "pkg/_client.py": (
+            "class Base:\n"
+            "    def _get_proxy_map(self, proxy):\n"
+            "        return {}\n"
+            "\n"
+            "class Client(Base):\n"
+            "    def __init__(self, proxy=None):\n"
+            "        self.mounts = self._get_proxy_map(proxy)\n"
+        ),
+        "tests/test_client.py": "from pkg import Client\n\ndef test_client():\n    Client()\n",
+    }
+    assert "_get_proxy_map" not in symbols(tmp_path, files)
+
+
+def test_base_method_called_from_a_dunder_on_a_used_class(tmp_path):
+    source = """
+    class Base:
+        def _open(self):
+            return 1
+
+    class Client(Base):
+        def __enter__(self):
+            self._open()
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def main():
+        with Client():
+            pass
+    """
+    assert "_open" not in symbols(tmp_path, {"app.py": source + MAIN})
 
 
 # --- dependencies ---

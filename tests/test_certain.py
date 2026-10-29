@@ -74,9 +74,9 @@ def test_reached_package_reports_only_certain_dead_code_at_100(tmp_path):
     assert all(finding.status == "DEAD" for finding in result.findings if finding.confidence == 100)
 
     by_symbol = {finding.symbol: finding for finding in result.findings}
-    for symbol in ("unused_module_function", "close", "limit", "TITLE", "buried"):
-        assert by_symbol[symbol].confidence == 60
-        assert "Public name" in by_symbol[symbol].evidence[-1]
+    for symbol in ("unused_module_function", "close", "limit", "TITLE"):
+        assert by_symbol[symbol].confidence == 96
+    assert by_symbol["buried"].confidence == 82
     for symbol in ("_unused_module_function", "_close", "_limit"):
         assert by_symbol[symbol].confidence == 96
     for name in ("run", "outer", "used_inner", "Box", "math"):

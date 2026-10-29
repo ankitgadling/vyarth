@@ -21,6 +21,7 @@ MANIFEST_NAMES = frozenset(
         "pyproject.toml",
         "Pipfile",
         "setup.py",
+        "setup.cfg",
     }
 )
 # Dependency manifests inside these directories are not project dependencies.

@@ -77,7 +77,7 @@ def test_src_prefix_import_leaves_an_uncalled_function(tmp_path):
     result = scan(tmp_path)
     found = {(finding.rule, finding.symbol, finding.confidence) for finding in result.findings}
     assert ("UNUSED_FUNCTION", "invalidate_account_cache", 96) not in found
-    assert ("UNUSED_FUNCTION", "set_cached_account", 60) in found
+    assert ("UNUSED_FUNCTION", "set_cached_account", 96) in found
     assert "src/account/cache.py" not in _modules(tmp_path)
 
 

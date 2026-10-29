@@ -53,7 +53,7 @@ These are always excluded, in addition to `.gitignore`, `.git/info/exclude`, and
 
 `.git`, `.vyarth`, `.venv`, `venv`, `__pycache__`, `build`, `dist`
 
-`tests/`, `test/`, `testing/`, `tests.py`, `test_*.py`, `*_test.py`, and `conftest.py` are indexed so their imports and calls keep application code alive. Findings inside those paths are hidden. A nested `.gitignore` applies under its directory. A later rule wins, so a nested `!` pattern can un-ignore a file. A `.gitignore` inside an already ignored directory is not read.
+`tests/`, a top-level `test/`, `tests.py`, `test_*.py`, `*_test.py`, and `conftest.py` are indexed so their imports and calls keep application code alive. Findings inside those paths are hidden. A nested `.gitignore` applies under its directory. A later rule wins, so a nested `!` pattern can un-ignore a file. A `.gitignore` inside an already ignored directory is not read.
 
 ## `ignore` and `exclude`
 

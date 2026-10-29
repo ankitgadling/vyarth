@@ -200,7 +200,7 @@ def test_file_getattr_keeps_unrelated_dead_functions(tmp_path):
         found = _named(result, symbol)
         assert len(found) == 1
         assert found[0].rule == "UNUSED_FUNCTION"
-        assert found[0].confidence == 60
+        assert found[0].confidence == 96
         assert "Dynamic usage" not in " ".join(found[0].evidence)
 
 
@@ -251,7 +251,7 @@ def test_literal_getattr_lowers_only_the_named_symbol(tmp_path):
     assert run[0].confidence <= 70
     assert len(limit) == 1
     assert limit[0].rule == "UNUSED_VARIABLE"
-    assert limit[0].confidence == 60
+    assert limit[0].confidence == 96
     assert "Dynamic usage" not in " ".join(limit[0].evidence)
 
     limit_only = scan(tmp_path / "limit_only")
@@ -260,7 +260,7 @@ def test_literal_getattr_lowers_only_the_named_symbol(tmp_path):
     assert len(lowered) == 1
     assert lowered[0].confidence <= 70
     assert len(kept) == 1
-    assert kept[0].confidence == 60
+    assert kept[0].confidence == 96
     assert "Dynamic usage" not in " ".join(kept[0].evidence)
 
 
@@ -353,7 +353,7 @@ def test_basemodel_fields_stay_quiet(tmp_path):
     limit = _named(result, "limit")
     assert len(limit) == 1
     assert limit[0].rule == "UNUSED_VARIABLE"
-    assert limit[0].confidence == 60
+    assert limit[0].confidence == 96
 
 
 def test_alias_call_uses_the_assignment_in_force(tmp_path):

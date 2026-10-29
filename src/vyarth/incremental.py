@@ -81,8 +81,22 @@ def load_cached(root: Path, relpath: str, stamp: str) -> FileIndex | None:
         return None
 
 
-def store_cached(root: Path, relpath: str, stamp: str, index: FileIndex) -> None:
-    """Write one cache record. A read-only project skips the cache instead of failing the scan."""
+CacheEntry = tuple[str, str, str, Path]
+"""A manifest row: relative path, stamp, absolute path, and the record file."""
+
+
+def store_cached(
+    root: Path,
+    relpath: str,
+    stamp: str,
+    index: FileIndex,
+    pending: list[CacheEntry] | None = None,
+) -> None:
+    """Write one cache record. A read-only project skips the cache instead of failing the scan.
+
+    With `pending`, the manifest row is queued for `remember_cached` so a scan
+    rewrites the manifest once, not once per file.
+    """
     try:
         ensure_cache_markers(root)
         path = _cache_path(root, relpath)
@@ -91,7 +105,31 @@ def store_cached(root: Path, relpath: str, stamp: str, index: FileIndex) -> None
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload), encoding="utf-8")
         temporary.replace(path)
-        _remember_cached(root, relpath, stamp, index.path, path)
+        if pending is not None:
+            pending.append((relpath, stamp, index.path, path))
+        else:
+            remember_cached(root, [(relpath, stamp, index.path, path)])
+    except OSError:
+        return
+
+
+def remember_cached(root: Path, entries: list[CacheEntry]) -> None:
+    """Add manifest rows for records already written. One read and one write."""
+    if not entries:
+        return
+    cache = root / ".vyarth" / "cache"
+    current = _load_manifest(root) or {}
+    files = current.get("files")
+    if not isinstance(files, dict):
+        files = {}
+    for relpath, stamp, absolute, cache_file in entries:
+        try:
+            cache_name = cache_file.resolve().relative_to(cache.resolve()).as_posix()
+        except ValueError:
+            continue
+        files[relpath] = {"stamp": stamp, "path": absolute, "cache": cache_name}
+    try:
+        _write_manifest(root, files)
     except OSError:
         return
 
@@ -321,20 +359,6 @@ def _result_path(root: Path) -> Path:
 
 def _manifest_path(root: Path) -> Path:
     return root / ".vyarth" / "cache" / "manifest.json"
-
-
-def _remember_cached(root: Path, relpath: str, stamp: str, absolute: str, cache_file: Path) -> None:
-    cache = root / ".vyarth" / "cache"
-    current = _load_manifest(root) or {}
-    files = current.get("files")
-    if not isinstance(files, dict):
-        files = {}
-    try:
-        cache_name = cache_file.resolve().relative_to(cache.resolve()).as_posix()
-    except ValueError:
-        return
-    files[relpath] = {"stamp": stamp, "path": absolute, "cache": cache_name}
-    _write_manifest(root, files)
 
 
 def _load_manifest(root: Path) -> dict | None:
