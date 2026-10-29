@@ -8,7 +8,7 @@ from pathlib import Path
 import pathspec
 
 from vyarth.config import Config
-from vyarth.discover import is_test_path, relative_posix
+from vyarth.discover import relative_posix
 from vyarth.entries import EntrySet
 from vyarth.flow import container_targets, held_elements, _module_function, _module_named
 from vyarth.model import PUBLIC_NAME_NOTE, Binding, CallEdge, FileIndex, Finding, is_private_name, make_fingerprint
@@ -91,18 +91,7 @@ def public_surface(project: Project, entries: EntrySet) -> PublicSurface:
                     visible = not is_private_name(binding.name)
                 if visible:
                     api.add((source.path, binding.qualname))
-    return PublicSurface(library=not _has_app_entry(project, entries), api=frozenset(api))
-
-
-def _has_app_entry(project: Project, entries: EntrySet) -> bool:
-    for path, _qualname in entries.symbols:
-        if not is_test_path(relative_posix(Path(path), project.root)):
-            return True
-    for name in entries.modules:
-        index = project.by_module.get(name)
-        if index is not None and not is_test_path(relative_posix(Path(index.path), project.root)):
-            return True
-    return False
+    return PublicSurface(library=not entries.app, api=frozenset(api))
 
 
 def reachable_modules(project: Project, entries: EntrySet, config: Config) -> set[str]:

@@ -70,11 +70,43 @@ _ENTRY_SUFFIXES = frozenset(
 class EntrySet:
     symbols: frozenset[tuple[str, str]]
     modules: frozenset[str]
+    # True when the scan holds a real program: a console script, `__main__.py`, a
+    # framework app, or a top-level script. `docs/conf.py`, `setup.py`, examples and
+    # a main guard inside a package module run code but do not make a project an app.
+    app: bool = False
+
+
+# Files that only a program has.
+_APP_FILE_NAMES = frozenset({"__main__.py", "wsgi.py", "asgi.py", "manage.py", "gunicorn.conf.py"})
+# Scripts that tooling or documentation runs. A main guard there says nothing about the project.
+_TOOLING_FILE_NAMES = frozenset({"setup.py", "conf.py", "noxfile.py", "fabfile.py", "tasks.py"})
+_SIDE_DIRS = frozenset(
+    {
+        "docs",
+        "doc",
+        "examples",
+        "example",
+        "tutorial",
+        "tutorials",
+        "samples",
+        "sample",
+        "demo",
+        "demos",
+        "benchmarks",
+        "scripts",
+        "bin",
+        "tools",
+    }
+)
+# Decorators that mark a callback, not a program. Plugin libraries use them too.
+_NOT_APP_DECORATORS = frozenset({"fixture", "hookimpl", "hookspec"})
 
 
 def collect_entries(project: Project, config: Config) -> EntrySet:
     symbols: set[tuple[str, str]] = set()
     modules: set[str] = set()
+    app = bool(config.entry_points) or bool(_console_scripts(project.root))
+    package_dirs = {Path(index.path).parent for index in project.indexes if Path(index.path).name == "__init__.py"}
     patterns = list(config.entry_patterns)
     if "django" in config.frameworks:
         patterns.extend(_DJANGO_PATTERNS)
@@ -98,6 +130,9 @@ def collect_entries(project: Project, config: Config) -> EntrySet:
         file_is_entry = index.has_main_guard or entry_files.match_file(relpath) or is_test_path(relpath)
         if file_is_entry and dotted:
             modules.add(dotted)
+        in_tests = is_test_path(relpath)
+        if not app and not in_tests:
+            app = _is_program_file(path, relpath, index.has_main_guard, entry_files, package_dirs, config)
         decorated: dict[str, list[str]] = {}
         for item in index.decorators:
             decorated.setdefault(item.qualname, []).append(item.name)
@@ -107,10 +142,67 @@ def collect_entries(project: Project, config: Config) -> EntrySet:
                 symbols.add((index.path, binding.qualname))
                 if dotted and binding.scope_kind == "module":
                     modules.add(dotted)
-            elif _framework_value(binding, config):
+                if not in_tests and any(
+                    is_entry_decorator(name, decorator_names) and name.rsplit(".", 1)[-1] not in _NOT_APP_DECORATORS
+                    for name in names
+                ):
+                    app = True
+            elif _framework_value(binding, config) or _sphinx_setting(binding, path, relpath):
                 symbols.add((index.path, binding.qualname))
     symbols.update(_base_symbols(project, config))
-    return EntrySet(symbols=frozenset(symbols), modules=frozenset(modules))
+    return EntrySet(symbols=frozenset(symbols), modules=frozenset(modules), app=app)
+
+
+def _is_program_file(
+    path: Path,
+    relpath: str,
+    has_main_guard: bool,
+    entry_files: pathspec.GitIgnoreSpec,
+    package_dirs: set[Path],
+    config: Config,
+) -> bool:
+    if path.name in _APP_FILE_NAMES:
+        return True
+    if "django" in config.frameworks and entry_files.match_file(relpath) and path.name != "conf.py":
+        return True
+    if not has_main_guard or path.name in _TOOLING_FILE_NAMES:
+        return False
+    if _SIDE_DIRS.intersection(relpath.split("/")[:-1]):
+        return False
+    # A main guard inside a package is a convenience for `python -m`, as in `requests/help.py`.
+    return path.parent not in package_dirs
+
+
+def _console_scripts(root: Path) -> list[tuple[str, str]]:
+    """Programs the project installs. Plugin entry-point groups are not programs."""
+    found: list[tuple[str, str]] = []
+    path = root / "pyproject.toml"
+    if path.is_file():
+        import tomllib
+
+        try:
+            with path.open("rb") as handle:
+                data = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        project = data.get("project", {})
+        if isinstance(project, dict):
+            for key in ("scripts", "gui-scripts"):
+                _collect_scripts(project.get(key, {}), found)
+        tool = data.get("tool", {})
+        poetry = tool.get("poetry", {}) if isinstance(tool, dict) else {}
+        if isinstance(poetry, dict):
+            _collect_scripts(poetry.get("scripts", {}), found)
+    found.extend(_setup_cfg_scripts(root / "setup.cfg", groups=("console_scripts", "gui_scripts")))
+    setup_py = root / "setup.py"
+    if setup_py.is_file():
+        try:
+            text = setup_py.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if "console_scripts" in text or "gui_scripts" in text:
+            found.extend(_setup_py_scripts(setup_py))
+    return found
 
 
 def _symbol_is_entry(
@@ -145,6 +237,13 @@ def _framework_value(binding: Binding, config: Config) -> bool:
     if "django" in config.frameworks and binding.name == "urlpatterns":
         return True
     return "celery" in config.frameworks and binding.name == "beat_schedule"
+
+
+def _sphinx_setting(binding: Binding, path: Path, relpath: str) -> bool:
+    """Sphinx reads the module-level names of `docs/conf.py` by name."""
+    if path.name != "conf.py" or binding.scope_kind != "module" or binding.kind != "variable":
+        return False
+    return bool({"docs", "doc"}.intersection(relpath.split("/")[:-1]))
 
 
 def _base_symbols(project: Project, config: Config) -> set[tuple[str, str]]:
@@ -232,7 +331,7 @@ def _collect_groups(groups: object, found: list[tuple[str, str]]) -> None:
         _collect_scripts(table, found)
 
 
-def _setup_cfg_scripts(path: Path) -> list[tuple[str, str]]:
+def _setup_cfg_scripts(path: Path, groups: tuple[str, ...] | None = None) -> list[tuple[str, str]]:
     if not path.is_file():
         return []
     import configparser
@@ -245,7 +344,9 @@ def _setup_cfg_scripts(path: Path) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     if not parser.has_section("options.entry_points"):
         return found
-    for _group, block in parser.items("options.entry_points"):
+    for group, block in parser.items("options.entry_points"):
+        if groups is not None and group not in groups:
+            continue
         for line in block.splitlines():
             _, _, target = line.partition("=")
             parsed = _parse_entrypoint(target) if target.strip() else None

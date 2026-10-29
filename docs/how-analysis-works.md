@@ -72,7 +72,7 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Situation | Score |
 | --- | --- |
 | Private module-level function or class with no references | 96 |
-| Public module-level function, class, or variable with no references | 96, or 60 when the project has no entry point or the name is exposed by an `__init__.py` or `__all__` |
+| Public module-level function, class, or variable with no references | 96, or 60 when the project is a library (no console script, `__main__.py`, framework app, or top-level script) or the name is exposed by an `__init__.py` or `__all__` |
 | Unreferenced method on a used class | 96, or 60 when the name is public API or the class has a base outside the project |
 | Unreferenced attribute on a used class | 96, or 60 when it is public API or the class has a base outside the project |
 | Decorated, and the decorator is not an entry | 75 |

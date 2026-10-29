@@ -31,7 +31,7 @@ A name listed in `__all__` is used. So is a name that another project module imp
 
 ## `UNUSED_FUNCTION` and `UNUSED_CLASS`
 
-A private module-level function or class with no references is `POSSIBLY_DEAD` at 96% when an entry module can import that file. A public name, one that does not start with `_`, also scores 96% when the project has an application entry point, because callers inside the project would show up as references. It scores 60% when outside code may load it: the project has no entry point of its own (a library), or a package `__init__.py` or an `__all__` list exposes the name. The text report lists the checks under `Evidence:`:
+A private module-level function or class with no references is `POSSIBLY_DEAD` at 96% when an entry module can import that file. A public name, one that does not start with `_`, also scores 96% when the project is an application (a console script, `__main__.py`, a framework callback, or a top-level script with a main guard; `docs/conf.py`, `setup.py`, examples, and package-internal main guards do not count), because callers inside the project would show up as references. It scores 60% when outside code may load it: the project has no entry point of its own (a library), or a package `__init__.py` or an `__all__` list exposes the name. The text report lists the checks under `Evidence:`:
 
 - No references found.
 - No decorators.

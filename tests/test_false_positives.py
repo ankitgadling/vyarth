@@ -653,3 +653,58 @@ def test_dependency_named_in_a_string_is_only_possible(tmp_path):
     )
     found = [item for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"]
     assert all(item.confidence < 90 for item in found)
+
+
+# --- library or application ---
+
+_GUARD = "\nif __name__ == '__main__':\n    pass\n"
+
+
+def test_docs_setup_and_package_main_guards_do_not_make_an_application(tmp_path):
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/api.py": "def helper():\n    return 1\n",
+        "pkg/help.py": "def info():\n    return 1\n" + _GUARD,
+        "docs/conf.py": "project = 'x'\n" + _GUARD,
+        "setup.py": "from setuptools import setup\nsetup()\n" + _GUARD,
+        "examples/demo.py": "def demo():\n    return 1\n" + _GUARD,
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["helper"].confidence == 60
+
+
+def test_console_script_makes_an_application(tmp_path):
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/cli.py": "from pkg import api\n\ndef main():\n    return api\n",
+        "pkg/api.py": "def helper():\n    return 1\n",
+        "pyproject.toml": "[project]\nname = 'x'\n[project.scripts]\nx = 'pkg.cli:main'\n",
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["helper"].confidence == 96
+
+
+def test_plugin_entry_point_group_does_not_make_an_application(tmp_path):
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/plugin.py": "def load():\n    return 1\n",
+        "pkg/api.py": "def helper():\n    return 1\n",
+        "pyproject.toml": "[project]\nname = 'x'\n[project.entry-points.pytest11]\nx = 'pkg.plugin:load'\n",
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["helper"].confidence == 60
+
+
+def test_dunder_main_module_makes_an_application(tmp_path):
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/__main__.py": "from pkg import api\nprint(api)\n",
+        "pkg/api.py": "def helper():\n    return 1\n",
+    }
+    found = {item.symbol: item for item in findings_for(tmp_path, files)}
+    assert found["helper"].confidence == 96
+
+
+def test_sphinx_settings_are_not_reported(tmp_path):
+    files = {"docs/conf.py": "project = 'x'\nextensions = []\n", "lib.py": "X = 1\n"}
+    assert not {"project", "extensions"} & symbols(tmp_path, files)
