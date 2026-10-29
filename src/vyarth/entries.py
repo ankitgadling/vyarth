@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import pathspec
 
@@ -43,6 +44,24 @@ _ENTRY_SUFFIXES = frozenset(
         "command",
         "group",
         "fixture",
+        "websocket",
+        "on_event",
+        "middleware",
+        "exception_handler",
+        "errorhandler",
+        "before_request",
+        "after_request",
+        "teardown_request",
+        "context_processor",
+        "template_filter",
+        "template_global",
+        "listens_for",
+        "receiver",
+        "hookimpl",
+        "hookspec",
+        "periodic_task",
+        "subscriber",
+        "listener",
     }
 )
 
@@ -51,11 +70,43 @@ _ENTRY_SUFFIXES = frozenset(
 class EntrySet:
     symbols: frozenset[tuple[str, str]]
     modules: frozenset[str]
+    # True when the scan holds a real program: a console script, `__main__.py`, a
+    # framework app, or a top-level script. `docs/conf.py`, `setup.py`, examples and
+    # a main guard inside a package module run code but do not make a project an app.
+    app: bool = False
+
+
+# Files that only a program has.
+_APP_FILE_NAMES = frozenset({"__main__.py", "wsgi.py", "asgi.py", "manage.py", "gunicorn.conf.py"})
+# Scripts that tooling or documentation runs. A main guard there says nothing about the project.
+_TOOLING_FILE_NAMES = frozenset({"setup.py", "conf.py", "noxfile.py", "fabfile.py", "tasks.py"})
+_SIDE_DIRS = frozenset(
+    {
+        "docs",
+        "doc",
+        "examples",
+        "example",
+        "tutorial",
+        "tutorials",
+        "samples",
+        "sample",
+        "demo",
+        "demos",
+        "benchmarks",
+        "scripts",
+        "bin",
+        "tools",
+    }
+)
+# Decorators that mark a callback, not a program. Plugin libraries use them too.
+_NOT_APP_DECORATORS = frozenset({"fixture", "hookimpl", "hookspec"})
 
 
 def collect_entries(project: Project, config: Config) -> EntrySet:
     symbols: set[tuple[str, str]] = set()
     modules: set[str] = set()
+    app = bool(config.entry_points) or bool(_console_scripts(project.root))
+    package_dirs = {Path(index.path).parent for index in project.indexes if Path(index.path).name == "__init__.py"}
     patterns = list(config.entry_patterns)
     if "django" in config.frameworks:
         patterns.extend(_DJANGO_PATTERNS)
@@ -79,6 +130,9 @@ def collect_entries(project: Project, config: Config) -> EntrySet:
         file_is_entry = index.has_main_guard or entry_files.match_file(relpath) or is_test_path(relpath)
         if file_is_entry and dotted:
             modules.add(dotted)
+        in_tests = is_test_path(relpath)
+        if not app and not in_tests:
+            app = _is_program_file(path, relpath, index.has_main_guard, entry_files, package_dirs, config)
         decorated: dict[str, list[str]] = {}
         for item in index.decorators:
             decorated.setdefault(item.qualname, []).append(item.name)
@@ -88,10 +142,67 @@ def collect_entries(project: Project, config: Config) -> EntrySet:
                 symbols.add((index.path, binding.qualname))
                 if dotted and binding.scope_kind == "module":
                     modules.add(dotted)
-            elif _framework_value(binding, config):
+                if not in_tests and any(
+                    is_entry_decorator(name, decorator_names) and name.rsplit(".", 1)[-1] not in _NOT_APP_DECORATORS
+                    for name in names
+                ):
+                    app = True
+            elif _framework_value(binding, config) or _sphinx_setting(binding, path, relpath):
                 symbols.add((index.path, binding.qualname))
     symbols.update(_base_symbols(project, config))
-    return EntrySet(symbols=frozenset(symbols), modules=frozenset(modules))
+    return EntrySet(symbols=frozenset(symbols), modules=frozenset(modules), app=app)
+
+
+def _is_program_file(
+    path: Path,
+    relpath: str,
+    has_main_guard: bool,
+    entry_files: pathspec.GitIgnoreSpec,
+    package_dirs: set[Path],
+    config: Config,
+) -> bool:
+    if path.name in _APP_FILE_NAMES:
+        return True
+    if "django" in config.frameworks and entry_files.match_file(relpath) and path.name != "conf.py":
+        return True
+    if not has_main_guard or path.name in _TOOLING_FILE_NAMES:
+        return False
+    if _SIDE_DIRS.intersection(relpath.split("/")[:-1]):
+        return False
+    # A main guard inside a package is a convenience for `python -m`, as in `requests/help.py`.
+    return path.parent not in package_dirs
+
+
+def _console_scripts(root: Path) -> list[tuple[str, str]]:
+    """Programs the project installs. Plugin entry-point groups are not programs."""
+    found: list[tuple[str, str]] = []
+    path = root / "pyproject.toml"
+    if path.is_file():
+        import tomllib
+
+        try:
+            with path.open("rb") as handle:
+                data = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        project = data.get("project", {})
+        if isinstance(project, dict):
+            for key in ("scripts", "gui-scripts"):
+                _collect_scripts(project.get(key, {}), found)
+        tool = data.get("tool", {})
+        poetry = tool.get("poetry", {}) if isinstance(tool, dict) else {}
+        if isinstance(poetry, dict):
+            _collect_scripts(poetry.get("scripts", {}), found)
+    found.extend(_setup_cfg_scripts(root / "setup.cfg", groups=("console_scripts", "gui_scripts")))
+    setup_py = root / "setup.py"
+    if setup_py.is_file():
+        try:
+            text = setup_py.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if "console_scripts" in text or "gui_scripts" in text:
+            found.extend(_setup_py_scripts(setup_py))
+    return found
 
 
 def _symbol_is_entry(
@@ -126,6 +237,13 @@ def _framework_value(binding: Binding, config: Config) -> bool:
     if "django" in config.frameworks and binding.name == "urlpatterns":
         return True
     return "celery" in config.frameworks and binding.name == "beat_schedule"
+
+
+def _sphinx_setting(binding: Binding, path: Path, relpath: str) -> bool:
+    """Sphinx reads the module-level names of `docs/conf.py` by name."""
+    if path.name != "conf.py" or binding.scope_kind != "module" or binding.kind != "variable":
+        return False
+    return bool({"docs", "doc"}.intersection(relpath.split("/")[:-1]))
 
 
 def _base_symbols(project: Project, config: Config) -> set[tuple[str, str]]:
@@ -180,24 +298,74 @@ def _configured_symbols(root: Path, config: Config) -> list[tuple[str, str]]:
 
 
 def _pyproject_scripts(root: Path) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
     path = root / "pyproject.toml"
+    if path.is_file():
+        import tomllib
+
+        try:
+            with path.open("rb") as handle:
+                data = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        project = data.get("project", {})
+        if isinstance(project, dict):
+            for key in ("scripts", "gui-scripts"):
+                _collect_scripts(project.get(key, {}), found)
+            _collect_groups(project.get("entry-points", {}), found)
+        tool = data.get("tool", {})
+        poetry = tool.get("poetry", {}) if isinstance(tool, dict) else {}
+        if isinstance(poetry, dict):
+            _collect_scripts(poetry.get("scripts", {}), found)
+            _collect_groups(poetry.get("plugins", {}), found)
+    found.extend(_setup_cfg_scripts(root / "setup.cfg"))
+    found.extend(_setup_py_scripts(root / "setup.py"))
+    return found
+
+
+def _collect_groups(groups: object, found: list[tuple[str, str]]) -> None:
+    """Every entry-point group, not only console scripts: plugins load by name."""
+    if not isinstance(groups, dict):
+        return
+    for table in groups.values():
+        _collect_scripts(table, found)
+
+
+def _setup_cfg_scripts(path: Path, groups: tuple[str, ...] | None = None) -> list[tuple[str, str]]:
     if not path.is_file():
         return []
-    import tomllib
+    import configparser
 
-    with path.open("rb") as handle:
-        data = tomllib.load(handle)
-    project = data.get("project", {})
-    if not isinstance(project, dict):
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(path, encoding="utf-8")
+    except (OSError, configparser.Error, UnicodeDecodeError):
         return []
     found: list[tuple[str, str]] = []
-    for key in ("scripts", "gui-scripts"):
-        _collect_scripts(project.get(key, {}), found)
-    entry_points = project.get("entry-points", {})
-    if isinstance(entry_points, dict):
-        for key in ("console_scripts", "gui_scripts"):
-            _collect_scripts(entry_points.get(key, {}), found)
+    if not parser.has_section("options.entry_points"):
+        return found
+    for group, block in parser.items("options.entry_points"):
+        if groups is not None and group not in groups:
+            continue
+        for line in block.splitlines():
+            _, _, target = line.partition("=")
+            parsed = _parse_entrypoint(target) if target.strip() else None
+            if parsed is not None:
+                found.append(parsed)
     return found
+
+
+_SETUP_ENTRY = re.compile(r"""['"]\s*[\w.\-]+\s*=\s*([\w.]+):([\w.]+)\s*(?:\[[^\]]*\])?\s*['"]""")
+
+
+def _setup_py_scripts(path: Path) -> list[tuple[str, str]]:
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [(match.group(1), match.group(2)) for match in _SETUP_ENTRY.finditer(text)]
 
 
 def _collect_scripts(table: object, found: list[tuple[str, str]]) -> None:
@@ -213,6 +381,8 @@ def _collect_scripts(table: object, found: list[tuple[str, str]]) -> None:
 
 def _parse_entrypoint(value: str) -> tuple[str, str] | None:
     text = value.strip()
+    if "[" in text:
+        text = text.split("[", 1)[0].strip()
     if ":" not in text:
         return (text, "") if text else None
     module, _, qualname = text.partition(":")

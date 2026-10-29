@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from vyarth.discover import relative_posix
-from vyarth.model import FileIndex, Finding
+from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding
 
 
 _NEUTRAL_DECORATORS = {
@@ -30,6 +30,7 @@ _CHECKLIST = (
 )
 _DYNAMIC_MESSAGE = "Dynamic usage detected. Static analysis cannot prove this symbol is unused."
 _DECORATED_NOTE = "Decorated, but not a recognized framework entry."
+_LAMBDA_NOTE = "Only referenced from a lambda this scan did not prove is called."
 _MODULE_CAP_NOTE = "This file has no incoming imports, so this score follows the module."
 _ALEMBIC_NOTE = "Alembic loads this name when the migration runs."
 _PROBE_NOTE = "This import sits in a try that catches ImportError, so it may be an availability check."
@@ -121,6 +122,13 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
         return finding
     if finding.rule not in {"UNUSED_FUNCTION", "UNUSED_CLASS"}:
         return finding
+    if index is not None and qualname in index.lambda_mentions:
+        return replace(
+            finding,
+            status="POSSIBLY_DEAD",
+            confidence=60,
+            evidence=_with_note(finding.evidence, _LAMBDA_NOTE),
+        )
     decorated = index is not None and _unrecognized_decorator(index, qualname)
     if decorated:
         evidence = (
@@ -133,7 +141,14 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
         return replace(finding, status="POSSIBLY_DEAD", confidence=min(finding.confidence, 75), evidence=evidence)
     if "." in qualname:
         return finding
-    return replace(finding, status="POSSIBLY_DEAD", confidence=96, evidence=_CHECKLIST)
+    # Rules already scored a public name that outside code may load at 60.
+    checklist = _with_note(_CHECKLIST, PUBLIC_NAME_NOTE) if PUBLIC_NAME_NOTE in finding.evidence else _CHECKLIST
+    return replace(
+        finding,
+        status="POSSIBLY_DEAD",
+        confidence=min(finding.confidence, 96),
+        evidence=checklist,
+    )
 
 
 def _unrecognized_decorator(index: FileIndex, qualname: str) -> bool:
@@ -151,9 +166,13 @@ def _symbol_dynamic(finding: Finding, index: FileIndex | None) -> bool:
         names.update(marker.symbols)
     if not names:
         return False
-    if finding.symbol in names:
+    if "*" in names:
         return True
-    return _qualname(finding).rsplit(".", 1)[-1] in names
+    prefixes = tuple(name[:-1] for name in names if name.endswith("*"))
+    leaf = _qualname(finding).rsplit(".", 1)[-1]
+    if prefixes and (finding.symbol.startswith(prefixes) or leaf.startswith(prefixes)):
+        return True
+    return finding.symbol in names or leaf in names
 
 
 def _import_dynamic(index: FileIndex) -> bool:
@@ -167,11 +186,11 @@ def _alembic(finding: Finding) -> Finding:
     path = finding.path.replace("\\", "/")
     if "alembic/versions/" not in path or finding.symbol not in _ALEMBIC_NAMES:
         return finding
-    if finding.rule not in _CAPPED_RULES or finding.confidence <= 70:
+    if finding.rule not in _CAPPED_RULES:
         return finding
     return replace(
         finding,
-        confidence=70,
+        confidence=min(finding.confidence, 70),
         status=_lowered_status(finding.status),
         evidence=_with_note(finding.evidence, _ALEMBIC_NOTE),
     )

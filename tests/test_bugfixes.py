@@ -309,6 +309,22 @@ def test_fix_removes_every_name_in_a_parenthesized_import(tmp_path):
     assert len(notes) == 2
 
 
+def test_quoted_name_inside_callable_keeps_a_type_checking_import(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text(
+        "from typing import TYPE_CHECKING, Any, Callable, TypeAlias\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "    from fractions import Fraction\n"
+        "\n"
+        'HookType: TypeAlias = Callable[["Decimal"], Any]\n',
+        encoding="utf-8",
+    )
+    unused = {finding.symbol for finding in scan(path).findings if finding.rule == "UNUSED_IMPORT"}
+    assert "Decimal" not in unused
+    assert "Fraction" in unused
+
+
 def test_quoted_annotation_keeps_a_type_checking_import(tmp_path):
     path = tmp_path / "app.py"
     path.write_text(
@@ -366,6 +382,23 @@ def test_cache_stamp_includes_the_analyzer_version():
     assert stamp.startswith(f"{__version__}:{INDEX_VERSION}:")
 
 
+def test_cached_index_tolerates_missing_confidence_fields():
+    from dataclasses import asdict
+
+    from vyarth.incremental import _index_from_dict
+    from vyarth.python_index import PythonAstBackend
+
+    index = PythonAstBackend().index_source("app.py", "def helper():\n    return 1\n")
+    data = asdict(index)
+    for item in data["bindings"]:
+        del item["typing_only"]
+    del data["lambda_mentions"]
+    loaded = _index_from_dict(data)
+    assert loaded.lambda_mentions == ()
+    binding = next(item for item in loaded.bindings if item.name == "helper")
+    assert binding.typing_only is False
+
+
 def test_later_assignment_is_the_call_target(tmp_path):
     write_tree(
         tmp_path,
@@ -419,6 +452,9 @@ def test_unreferenced_method_and_class_attribute_score_96(tmp_path):
                 "    def close(self):\n"
                 "        return 1\n"
                 "\n"
+                "    def _close(self):\n"
+                "        return 1\n"
+                "\n"
                 "def main():\n"
                 "    Box()\n"
                 "\n"
@@ -430,6 +466,7 @@ def test_unreferenced_method_and_class_attribute_score_96(tmp_path):
     findings = {finding.symbol: finding for finding in scan(tmp_path).findings}
     assert findings["close"].rule == "UNUSED_FUNCTION"
     assert findings["close"].confidence == 96
+    assert findings["_close"].confidence == 96
     assert findings["quiet"].rule == "UNUSED_FUNCTION"
     assert findings["quiet"].confidence == 96
     assert findings["LIMIT"].rule == "UNUSED_VARIABLE"
@@ -1050,6 +1087,42 @@ def test_node_visitor_methods_are_reached(tmp_path):
     assert ("UNUSED_FUNCTION", "visit_page") in found
 
 
+def test_root_scan_skips_nested_example_requirements(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'app'\nversion = '0.1'\n",
+            "requirements.txt": "root-only-pkg\n",
+            "examples/celery/requirements.txt": "amqp\nkombu\n",
+            "docs/requirements.txt": "sphinx\n",
+            "main.py": "if __name__ == '__main__':\n    print(1)\n",
+        },
+    )
+    root_symbols = {item.symbol for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert "root-only-pkg" in root_symbols
+    assert "amqp" not in root_symbols
+    assert "kombu" not in root_symbols
+    assert "sphinx" not in root_symbols
+
+    from vyarth.config import Config
+
+    reported = {
+        item.symbol
+        for item in scan(tmp_path, config=Config(report_dev_dependencies=True)).findings
+        if item.rule == "UNUSED_DEPENDENCY"
+    }
+    assert "sphinx" in reported
+    assert "amqp" not in reported
+
+    example = {
+        item.symbol
+        for item in scan(tmp_path / "examples" / "celery").findings
+        if item.rule == "UNUSED_DEPENDENCY"
+    }
+    assert {"amqp", "kombu", "root-only-pkg"} <= example
+    assert "sphinx" not in example
+
+
 def test_subdirectory_scan_ignores_manifests_outside_it(tmp_path):
     write_tree(
         tmp_path,
@@ -1238,6 +1311,9 @@ def test_external_base_methods_score_60(tmp_path):
                 "    def close(self):\n"
                 "        return 1\n"
                 "\n"
+                "    def _shut(self):\n"
+                "        return 1\n"
+                "\n"
                 "def main():\n"
                 "    Enc()\n"
                 "    Worker()\n"
@@ -1253,6 +1329,7 @@ def test_external_base_methods_score_60(tmp_path):
     assert "external base" in findings["default"].evidence[-1]
     assert findings["run"].confidence == 60
     assert findings["close"].confidence == 96
+    assert findings["_shut"].confidence == 96
 
 
 def test_builtin_alias_and_call_bases_score_60(tmp_path):
@@ -1326,6 +1403,9 @@ def test_project_class_bases_stay_96(tmp_path):
                 "    def keep(self):\n"
                 "        return 1\n"
                 "\n"
+                "    def _keep(self):\n"
+                "        return 1\n"
+                "\n"
                 "class Direct(Local):\n"
                 "    def extra(self):\n"
                 "        return 2\n"
@@ -1359,10 +1439,8 @@ def test_project_class_bases_stay_96(tmp_path):
         },
     )
     findings = {item.symbol: item for item in scan(tmp_path).findings if item.rule == "UNUSED_FUNCTION"}
-    assert findings["extra"].confidence == 96
-    assert findings["other"].confidence == 96
-    assert findings["seal"].confidence == 96
-    assert findings["keep"].confidence == 96
+    for name in ("extra", "other", "seal", "keep", "_keep"):
+        assert findings[name].confidence == 96
     assert findings["pack"].confidence == 60
 
 
@@ -1583,17 +1661,10 @@ def test_scanning_a_package_directory_keeps_its_name(tmp_path):
         assert "run" not in symbols
 
 
-def test_comprehension_fingerprint_stays_when_a_function_is_inserted(tmp_path):
+def test_unused_comprehension_target_is_not_reported(tmp_path):
     path = tmp_path / "a.py"
     path.write_text("def f():\n    return [1 for i in range(3)]\n\nf()\n", encoding="utf-8")
-    before = next(item.fingerprint for item in scan(path).findings if item.symbol == "i")
-    path.write_text(
-        "def earlier():\n    return 1\n\ndef f():\n    return [1 for i in range(3)]\n\nearlier()\nf()\n",
-        encoding="utf-8",
-    )
-    after = next(item.fingerprint for item in scan(path).findings if item.symbol == "i")
-    assert before == after
-    assert "<comprehension#1>" in before
+    assert not [item for item in scan(path).findings if item.symbol == "i"]
 
 
 def test_ignore_bases_covers_a_class_nested_in_a_function(tmp_path):

@@ -14,6 +14,35 @@ import pathspec
 from vyarth.config import TEST_PATTERNS, Config
 
 
+MANIFEST_NAMES = frozenset(
+    {
+        "requirements.txt",
+        "requirements-dev.txt",
+        "pyproject.toml",
+        "Pipfile",
+        "setup.py",
+        "setup.cfg",
+    }
+)
+# Dependency manifests inside these directories are not project dependencies.
+# Python files there are still indexed when an exclude or gitignore does not skip them.
+MANIFEST_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".vyarth",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "site-packages",
+        "node_modules",
+    }
+)
+
+
 def project_root(start: Path) -> Path:
     """Nearest directory at or above `start` that holds the project file or a git checkout."""
     current = start.resolve()
@@ -29,10 +58,39 @@ def discover_files(root: Path, config: Config, *, within: Path | None = None) ->
     Excludes and `.gitignore` are matched on paths relative to `root`. `within` limits
     the walk when the caller asked to scan a subdirectory of the project.
     """
+    return discover_scan(root, config, within=within)[0]
+
+
+def discover_scan(
+    root: Path,
+    config: Config,
+    *,
+    within: Path | None = None,
+) -> tuple[list[Path], list[Path]]:
+    """Python files and dependency manifests from one walk.
+
+    A subdirectory scan still records manifests that sit in the project root.
+    `dependency_findings` decides which of those manifests belong to the scan.
+    """
     root = root.resolve()
     start = root if within is None else within.resolve()
     exclude_spec, gitignore = exclusion_specs(root, config)
     found: list[Path] = []
+    manifests: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_manifest(path: Path) -> None:
+        if not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        relative = _relative(root, resolved)
+        if _excluded(exclude_spec, gitignore, relative) or manifest_dir_skipped(relative):
+            return
+        seen.add(resolved)
+        manifests.append(resolved)
+
     for dirpath, dirnames, filenames in os_walk(start):
         directory = Path(dirpath)
         kept: list[str] = []
@@ -43,15 +101,27 @@ def discover_files(root: Path, config: Config, *, within: Path | None = None) ->
             kept.append(name)
         dirnames[:] = kept
         for name in filenames:
+            path = directory / name
+            if name in MANIFEST_NAMES:
+                add_manifest(path)
             if not name.endswith(".py"):
                 continue
-            path = directory / name
             rel = _relative(root, path)
             if _excluded(exclude_spec, gitignore, rel):
                 continue
             found.append(path)
+    if start != root:
+        for name in sorted(MANIFEST_NAMES):
+            add_manifest(root / name)
     found.sort(key=lambda path: _relative(root, path))
-    return found
+    manifests.sort(key=lambda path: _relative(root, path))
+    return found, manifests
+
+
+def manifest_dir_skipped(relative: str) -> bool:
+    """True when a manifest sits under a directory the dependency walk never enters."""
+    parts = [part for part in relative.split("/") if part]
+    return any(part in MANIFEST_SKIP_DIRS or part.endswith(".egg-info") for part in parts[:-1])
 
 
 def package_roots(root: Path, extra: Iterable[Path] = ()) -> list[Path]:
@@ -61,9 +131,43 @@ def package_roots(root: Path, extra: Iterable[Path] = ()) -> list[Path]:
     src = root / "src"
     if src.is_dir():
         roots.add(src.resolve())
+    roots.update(_inferred_roots(root))
     for item in extra:
         roots.add(item.resolve())
     return sorted(roots, key=lambda path: len(path.as_posix()), reverse=True)
+
+
+_NOT_IMPORT_ROOTS = frozenset(
+    {"tests", "test", "testing", "docs", "doc", "examples", "node_modules", "build", "dist", "venv", "site-packages"}
+)
+
+
+def _inferred_roots(root: Path) -> set[Path]:
+    """Top-level folders that hold packages but are not packages themselves.
+
+    A monorepo layout such as ``backend/app/__init__.py`` is imported as ``app``
+    once ``backend/`` is on ``sys.path``. ``src/`` is handled by the caller.
+    """
+    found: set[Path] = set()
+    try:
+        children = [child for child in root.iterdir() if child.is_dir()]
+    except OSError:
+        return found
+    for child in children:
+        name = child.name
+        if name.startswith((".", "_")) or name == "src" or name in _NOT_IMPORT_ROOTS or not name.isidentifier():
+            continue
+        if (child / "__init__.py").is_file():
+            continue
+        try:
+            has_package = any(
+                grandchild.is_dir() and (grandchild / "__init__.py").is_file() for grandchild in child.iterdir()
+            )
+        except OSError:
+            continue
+        if has_package:
+            found.add(child.resolve())
+    return found
 
 
 def read_python_source(path: str | Path) -> tuple[str, str]:

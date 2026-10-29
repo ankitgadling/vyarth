@@ -53,7 +53,7 @@ These are always excluded, in addition to `.gitignore`, `.git/info/exclude`, and
 
 `.git`, `.vyarth`, `.venv`, `venv`, `__pycache__`, `build`, `dist`
 
-`tests/`, `test_*.py`, `*_test.py`, and `conftest.py` are indexed so their imports and calls keep application code alive. Findings inside those paths are hidden. A nested `.gitignore` applies under its directory. A later rule wins, so a nested `!` pattern can un-ignore a file. A `.gitignore` inside an already ignored directory is not read.
+`tests/`, a top-level `test/`, `tests.py`, `test_*.py`, `*_test.py`, and `conftest.py` are indexed so their imports and calls keep application code alive. Findings inside those paths are hidden. A nested `.gitignore` applies under its directory. A later rule wins, so a nested `!` pattern can un-ignore a file. A `.gitignore` inside an already ignored directory is not read.
 
 ## `ignore` and `exclude`
 
@@ -72,9 +72,16 @@ The default entry patterns are:
 **/manage.py
 setup.py
 **/docs/conf.py
+noxfile.py
+fabfile.py
+tasks.py
+**/gunicorn.conf.py
+**/alembic/env.py
+scripts/**/*.py
+bin/**/*.py
 ```
 
-`[project.scripts]`, `[project.gui-scripts]`, and the `[project.entry-points]` groups `console_scripts` and `gui_scripts` in `pyproject.toml` are read automatically. `entry_points` adds more targets in the form `pkg.wsgi:app`. A value with no colon names a module.
+`[project.scripts]`, `[project.gui-scripts]`, every `[project.entry-points]` group, `[tool.poetry.scripts]`, and `[tool.poetry.plugins]` in `pyproject.toml` are read automatically, as are `[options.entry_points]` in `setup.cfg` and `entry_points` strings in `setup.py`. A top-level folder that holds packages but is not one itself, such as `backend/app/__init__.py`, is an import root. `entry_points` adds more targets in the form `pkg.wsgi:app`. A value with no colon names a module.
 
 `framework_decorators` matches the decorator’s full name or its final attribute. `myapp.route` matches `@myapp.route` and `@route` does not, unless you also list `route`. The built-in hook names are always recognized. `ignore_decorators` uses the same match and makes the decorated symbol an entry, so its body stays reachable. See [How analysis works](how-analysis-works.md).
 
@@ -102,4 +109,6 @@ vyarth scan . --define ENVIRONMENT=production --define DEBUG=false
 
 ## Cache
 
-Directory scans store one JSON record per file under `.vyarth/cache`. The key includes the Vyarth version, the index version, the relative path, size, modification time, the fold map, and the duplicate-statement minimum. On a cache hit the stored absolute path is replaced with the file being scanned, so moving the project does not reuse a stale location. The first write creates `.vyarth/.gitignore` containing `*` and a `CACHEDIR.TAG`. A cache write that the filesystem rejects is skipped; the scan still finishes. After a scan of the project root, cache files whose stored path was not indexed are deleted. A subdirectory scan and a language-server overlay do not prune the cache. `--no-cache` reparses every file. A single-file scan does not use the cache. Overlay text from the language server is not cached.
+Directory scans store one JSON record per file under `.vyarth/cache`, plus `manifest.json` listing each record's relative path, stamp, and absolute path. Prune reads that list. It reads a record only when the list is missing or names a path this scan did not index. The per-file key includes the Vyarth version, the index version, the relative path, size, modification time, the fold map, and the duplicate-statement minimum. On a cache hit the stored absolute path is replaced with the file being scanned, so moving the project does not reuse a stale location.
+
+An unchanged directory scan also reuses the finding list from the previous analysis. That key covers the Vyarth version, the scan directory, each indexed Python file, each dependency manifest the scan would read, and the analysis settings. `--min-confidence`, a baseline, and `--changed` are applied to the stored list. A single-file scan, `--no-cache`, and language-server overlay text skip this result. The first write creates `.vyarth/.gitignore` containing `*` and a `CACHEDIR.TAG`. A cache write that the filesystem rejects is skipped; the scan still finishes. After a scan of the project root, cache files whose stored path was not indexed are deleted. A subdirectory scan and a language-server overlay do not prune the cache.

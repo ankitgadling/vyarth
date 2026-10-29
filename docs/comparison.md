@@ -87,6 +87,49 @@ Nine of Flask’s unused-dependency findings score 95. Several of those names, i
 
 `quote_plus`, `unquote_plus`, and `urldefrag` in `requests/compat.py` are legacy names. Vulture reports them as unused imports at 90, and deadcode reports them as DC07. Vyarth reports them at 70, so they fall out of the ≥90 column. `compat.py` calls `importlib.import_module`, which lowers every unused import in that file. The same file’s `OrderedDict`, `Callable`, and `StringIO` are at 70 for the same reason. deadcode’s fourth DC07 is `HEADER_VALIDATORS` in `requests/utils.py`.
 
-`MockRequest.get_full_url` in `requests/cookies.py` is part of the `urllib2.Request` surface that `http.cookiejar` calls. Nothing in the checkout loads that name. Vyarth reports it as an unused function at 96. Vulture reports it as an unused method at 60, so `--min-confidence 80` hides it.
+`MockRequest.get_full_url` in `requests/cookies.py` is part of the `urllib2.Request` surface that `http.cookiejar` calls. Nothing in the checkout loads that name. This run reported it as an unused function at 96. Vulture reports it as an unused method at 60, so `--min-confidence 80` hides it. A public method now scores 60.
 
-`Flask.send_static_file` in `src/flask/app.py` is an unused function at 96. The checkout never loads that name. Vulture’s output, including the confidence-60 run, does not list `send_static_file`. That gap, and the function-count gap in the table above, is why this page stops at raw counts and the lines checked here.
+`Flask.send_static_file` in `src/flask/app.py` was an unused function at 96 in this run. The checkout never loads that name. Vulture’s output, including the confidence-60 run, does not list `send_static_file`. That gap, and the function-count gap in the table above, is why this page stops at raw counts and the lines checked here. The same method now scores 60. See the rerun below.
+
+## Public names, rescored
+
+This section measures the first version of the change, which scored every public name at 60. A later change scores a public name at 60 only in a library or when `__init__.py` or `__all__` exposes it, so an application keeps 96 on a dead public helper. The counts below are from the first version.
+
+The counts above are from 8 October 2026. On 23 October 2026 the same Flask commit (`d086db856be187255b8ec61ef409357393020f32`, 83 Python files) was scanned again with the scorer before and after public names moved to 60. Both runs used `vyarth scan . --min-confidence 0 --no-cache`. The “before” tree is the repository at `3252085`, which already differed slightly from the October counts.
+
+| | Before | After |
+| --- | --- | --- |
+| Findings | 175 | 162 |
+| Confidence ≥ 90 | 88 | 4 |
+| Confidence ≥ 70 | 141 | 49 |
+| Confidence 100 | 32 | 1 |
+
+The four findings that stay at or above 90 are private: `_make_timedelta`, `_path_is_ancestor`, `_find_error_handler` (96), and `_srcobj` (100). `Flask.send_static_file` and `Blueprint.send_static_file` are still reported, at 60. Thirteen example dependencies, including `amqp` and `kombu` from `examples/celery/requirements.txt`, are no longer reported. The two dependency findings that remain, `types-contextvars` and `types-dataclasses`, score 70 because a top-level import shares their namespace.
+
+## Same checkouts, with the other tools
+
+The rerun above only compared two Vyarth scorers. On 23 October 2026 the same two checkouts were scanned again with the updated Vyarth and with the other tools from the table at the top. Python was 3.12.6 on Windows. Vulture 2.16, deadcode 2.4.1, and dead 2.1.0 printed the same counts as on 8 October. Skylos was not run. `pip install skylos` still has no Windows wheel for `tree-sitter-dart-orchard`, and this machine has no Microsoft C++ build tools.
+
+Vyarth still hides findings inside test modules. Vulture, deadcode, and dead do not, so their totals include test files.
+
+| Project | Vyarth | Vyarth ≥90 | Vulture ≥60 | Vulture ≥80 | deadcode | dead |
+| --- | --- | --- | --- | --- | --- | --- |
+| Flask 3.2.0.dev | 162 | 4 | 342 | 35 | 307 | 66 |
+| requests 2.34.2 | 103 | 4 | 89 | 11 | 84 | 70 |
+
+`dead` on Flask is still 36 names that are never read and 30 that are only referenced in tests. On requests those splits are still 63 and 7.
+
+Imports and functions at the stricter threshold:
+
+| Project | Vyarth imports ≥90 | Vyarth functions ≥90 | Vulture imports ≥80 | Vulture functions ≥80 | deadcode imports (DC07) | deadcode functions (DC02) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Flask 3.2.0.dev | 0 | 3 | 0 | 0 | 0 | 252 |
+| requests 2.34.2 | 1 | 0 | 3 | 0 | 4 | 8 |
+
+Vulture at confidence 60 still reports 252 unused functions and 10 unused methods in Flask, and deadcode reports the same 252 functions (DC02) and 10 methods (DC04). Neither tool’s confidence-80 run prints an unused function. Vyarth’s three functions at or above 90 are private: `_make_timedelta`, `_path_is_ancestor`, and `_find_error_handler`.
+
+Of Vulture’s 35 Flask lines at confidence 80, 26 are under `tests/`. The other 9 are unused variables and one unreachable statement. On requests, 8 of the 11 are under `tests/`, and the other 3 are `quote_plus`, `unquote_plus`, and `urldefrag` in `src/requests/compat.py`. Vyarth scores those three imports at 70, because that file calls `importlib.import_module`.
+
+Vyarth’s four requests findings at or above 90 are the unused import `Response` in `src/requests/_types.py` (100) and the private names `_host`, `_port`, and `_fragment` in `src/requests/utils.py`. `MockRequest.get_full_url` is still reported, at 60. Vulture reports that method only at 60, so `--min-confidence 80` hides it. deadcode reports it as DC04.
+
+Flask’s dependency findings are the two type stubs at 70. requests has five, all at 70: `pysocks`, `pytest-httpbin`, `pytest-cov`, `pytest-mock`, and `pytest-xdist`. None of them reach 90.

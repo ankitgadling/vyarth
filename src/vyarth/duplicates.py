@@ -37,7 +37,7 @@ def duplicate_findings(indexes: list[FileIndex], root: Path, minimum: int) -> li
                     column=1,
                     symbol=body.name,
                     status="POSSIBLY_DUPLICATE",
-                    confidence=90,
+                    confidence=80,
                     message=_MESSAGE.format(name=body.name, origin=evidence),
                     evidence=(evidence,),
                     fingerprint=make_fingerprint("DUPLICATE_CODE", relpath, body.qualname),

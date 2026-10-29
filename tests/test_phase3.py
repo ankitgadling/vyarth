@@ -162,10 +162,10 @@ def test_duplicate_bodies_are_reported(tmp_path):
     )
     finding = next(item for item in scan(tmp_path).findings if item.rule == "DUPLICATE_CODE")
     assert finding.symbol == "save_b"
-    assert finding.confidence == 82
+    assert finding.confidence == 80
     assert finding.status == "POSSIBLY_DUPLICATE"
     assert finding.evidence[0] == "pkg/a.py:save_a"
-    assert "no incoming imports" in finding.evidence[-1]
+    assert finding.evidence == ("pkg/a.py:save_a",)
 
 
 def test_sarif_paths_include_the_git_prefix(tmp_path, capsys):
@@ -243,8 +243,9 @@ def test_changed_includes_files_below_the_git_root(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "fresh" in text
     assert "added" in text
-    assert "old" not in text
-    assert "outside" not in text
+    assert "Function: old" not in text
+    assert "Function: outside" not in text
+    assert "other.py" not in text
 
 
 def test_changed_warns_when_python_edits_are_outside_the_project(tmp_path, capsys):

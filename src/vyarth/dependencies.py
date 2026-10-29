@@ -9,7 +9,15 @@ import re
 import tomllib
 
 from vyarth.config import Config
-from vyarth.discover import exclusion_specs, path_excluded, read_python_source, relative_posix
+from vyarth.discover import (
+    MANIFEST_NAMES,
+    MANIFEST_SKIP_DIRS,
+    exclusion_specs,
+    manifest_dir_skipped,
+    path_excluded,
+    read_python_source,
+    relative_posix,
+)
 from vyarth.model import FileIndex, Finding, ParseError, make_fingerprint
 
 
@@ -38,8 +46,43 @@ _RUNTIME_ONLY = frozenset(
         "redis",
         "hiredis",
         "whitenoise",
+        "python-multipart",
+        "uvloop",
+        "httptools",
+        "email-validator",
     }
 )
+_TOOLING_NOTE = "This package is a tool or plugin that runs without being imported."
+_STRING_NOTE = "A string in the source names this package, as settings and plugin lists do."
+_TOOLING = frozenset(
+    {
+        "black",
+        "flake8",
+        "mypy",
+        "pylint",
+        "ruff",
+        "isort",
+        "pytest",
+        "coverage",
+        "tox",
+        "nox",
+        "pre-commit",
+        "setuptools",
+        "wheel",
+        "pip",
+        "pip-tools",
+        "twine",
+        "build",
+        "bandit",
+        "pyright",
+        "autopep8",
+        "yapf",
+        "sphinx",
+        "mkdocs",
+    }
+)
+_TOOLING_PREFIXES = ("pytest-", "flake8-", "types-", "mypy-", "pylint-", "sphinx-", "mkdocs-", "django-stubs")
+_TOOLING_SUFFIXES = ("-stubs",)
 _DEV_EXTRAS = {"dev", "test", "tests", "docs", "doc", "lint"}
 _CANONICAL = {
     "pil": "pillow",
@@ -56,20 +99,20 @@ _CANONICAL = {
     "openssl": "pyopenssl",
     "pyopenssl": "pyopenssl",
 }
-_MANIFESTS = {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile", "setup.py"}
-_SKIP_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".vyarth",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "site-packages",
-    "node_modules",
+_MANIFESTS = MANIFEST_NAMES
+_EXAMPLE_PARTS = {
+    "example",
+    "examples",
+    "sample",
+    "samples",
+    "demo",
+    "demos",
+    "tutorial",
+    "tutorials",
+    "benchmark",
+    "benchmarks",
 }
+_SKIP_DIRS = MANIFEST_SKIP_DIRS
 _IMPORT_ALIAS = {
     "psycopg2-binary": "psycopg2",
     "pyjwt": "jwt",
@@ -83,15 +126,18 @@ def dependency_findings(
     root: Path,
     within: Path | None = None,
     config: Config | None = None,
+    manifests: list[Path] | None = None,
 ) -> tuple[list[Finding], list[ParseError]]:
     if config is None:
         config = Config()
     modules = _import_modules(indexes)
     imported = {_canonical(_top_level(name)) for name in modules}
     distributions = _used_distributions(modules)
+    string_tops = {text.split(".", 1)[0].lower() for index in indexes for text in index.module_strings}
     declared: dict[str, tuple[str, int, bool]] = {}
     errors: list[ParseError] = []
-    for manifest, packages, error in _declared(root, config):
+    declared_rows = _declared(root, config) if manifests is None else _read_collected(manifests, root)
+    for manifest, packages, error in declared_rows:
         if not _manifest_in_scan(manifest, root, within):
             continue
         if error is not None:
@@ -121,6 +167,12 @@ def dependency_findings(
                 continue
             confidence = 70
             evidence = (_DEV_EVIDENCE.format(path=relpath),)
+        elif _is_tooling(name):
+            confidence = 70
+            evidence = (_TOOLING_NOTE,)
+        elif _named_in_strings(name, string_tops):
+            confidence = 70
+            evidence = (_STRING_NOTE,)
         elif name in _RUNTIME_ONLY:
             confidence = 70
             evidence = (_RUNTIME_NOTE,)
@@ -147,16 +199,46 @@ def dependency_findings(
     return findings, errors
 
 
+def selected_manifests(paths: list[Path], root: Path, within: Path | None) -> list[Path]:
+    """Manifests from discovery that this scan should read."""
+    return [path for path in paths if _manifest_in_scan(path, root, within)]
+
+
+def _read_collected(
+    manifests: list[Path],
+    root: Path,
+) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
+    rows: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
+    for path in manifests:
+        packages, error = _read_manifest(path, root)
+        rows.append((path, packages, error))
+    return rows
+
+
 def _manifest_in_scan(path: Path, root: Path, within: Path | None) -> bool:
     """Keep manifests inside the scanned directory, plus files that sit in the project root.
 
+    A scan of the project root skips manifests under example, tutorial, sample,
+    demo, and benchmark directories. Nested package manifests still count.
     A `vyarth scan src` still sees the root `pyproject.toml`. It does not see
-    `examples/requirements.txt`.
+    `examples/requirements.txt`. Scanning that examples directory does.
     """
     resolved = path.resolve()
-    if within is None or resolved.is_relative_to(within.resolve()):
+    root_resolved = root.resolve()
+    scan_root = root_resolved if within is None else within.resolve()
+    if scan_root == root_resolved and _under_example_tree(resolved, root_resolved):
+        return False
+    if resolved.is_relative_to(scan_root):
         return True
-    return resolved.parent == root.resolve()
+    return resolved.parent == root_resolved
+
+
+def _under_example_tree(path: Path, root: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part.lower() in _EXAMPLE_PARTS for part in relative.parts[:-1])
 
 
 def _import_modules(indexes: list[FileIndex]) -> set[str]:
@@ -265,6 +347,24 @@ def _import_match(name: str, modules: set[str]) -> str:
     return "namespace" if namespace else ""
 
 
+def _is_tooling(name: str) -> bool:
+    return name in _TOOLING or name.startswith(_TOOLING_PREFIXES) or name.endswith(_TOOLING_SUFFIXES)
+
+
+def _named_in_strings(name: str, string_tops: set[str]) -> bool:
+    """True when a source string equals an import name of this distribution."""
+    if not string_tops:
+        return False
+    candidates = {name.replace("-", "_"), name.replace("-", "")}
+    alias = _IMPORT_ALIAS.get(name)
+    if alias:
+        candidates.add(alias)
+    for top, dists in _distribution_map().items():
+        if any(_canonical(str(dist)) == name for dist in dists):
+            candidates.add(top)
+    return any(candidate.lower() in string_tops for candidate in candidates)
+
+
 def _top_level(name: str) -> str:
     return name.split(".", 1)[0]
 
@@ -285,9 +385,9 @@ def _declared(
         directory = Path(dirpath)
         kept: list[str] = []
         for name in dirnames:
-            if name in _SKIP_DIRS or name.endswith(".egg-info"):
-                continue
             relative = relative_posix(directory / name, root)
+            if name in _SKIP_DIRS or name.endswith(".egg-info") or manifest_dir_skipped(relative):
+                continue
             if path_excluded(relative, exclude_spec, gitignore):
                 continue
             kept.append(name)

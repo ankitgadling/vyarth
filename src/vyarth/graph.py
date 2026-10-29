@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pathspec
@@ -10,7 +11,7 @@ from vyarth.config import Config
 from vyarth.discover import relative_posix
 from vyarth.entries import EntrySet
 from vyarth.flow import container_targets, held_elements, _module_function, _module_named
-from vyarth.model import Binding, CallEdge, FileIndex, Finding, make_fingerprint
+from vyarth.model import PUBLIC_NAME_NOTE, Binding, CallEdge, FileIndex, Finding, is_private_name, make_fingerprint
 from vyarth.progress import ScanProgress
 from vyarth.project import Project, call_is_dead
 
@@ -35,6 +36,62 @@ _FIELD_NAMES = {
     "attrs.frozen",
     "attrs.mutable",
 }
+
+
+@dataclass(frozen=True)
+class PublicSurface:
+    """Where an unused public name may still be called from outside the scan.
+
+    A project with no application entry point is a library, so every public name
+    is part of its API. Otherwise only names a package `__init__.py` or an
+    `__all__` list exposes are.
+    """
+
+    library: bool = False
+    api: frozenset[tuple[str, str]] = frozenset()
+
+    def covers(self, path: str, qualname: str) -> bool:
+        if self.library:
+            return True
+        parts = qualname.split(".")
+        return any((path, ".".join(parts[:count])) in self.api for count in range(1, len(parts) + 1))
+
+
+def public_surface(project: Project, entries: EntrySet) -> PublicSurface:
+    api: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        for name in index.exports:
+            exported = project.module_binding(index.path, name)
+            if exported is not None:
+                api.add((index.path, exported.qualname))
+        if Path(index.path).name != "__init__.py":
+            continue
+        for binding in index.bindings:
+            if binding.scope_kind != "module":
+                continue
+            if binding.kind == "import":
+                target = _follow_imports(project, index.path, binding.qualname)
+                if target[1] in project.bindings.get(target[0], {}) and target != (index.path, binding.qualname):
+                    api.add(target)
+            elif not is_private_name(binding.name):
+                api.add((index.path, binding.qualname))
+        for edge in index.imports:
+            if not edge.is_wildcard:
+                continue
+            module = project.resolve_import(edge.module, edge.level, index.path)
+            source = project.by_module.get(module) if module else None
+            if source is None:
+                continue
+            for binding in source.bindings:
+                if binding.scope_kind != "module" or binding.kind == "import":
+                    continue
+                if source.exports:
+                    visible = binding.name in source.exports
+                else:
+                    visible = not is_private_name(binding.name)
+                if visible:
+                    api.add((source.path, binding.qualname))
+    return PublicSurface(library=not entries.app, api=frozenset(api))
 
 
 def reachable_modules(project: Project, entries: EntrySet, config: Config) -> set[str]:
@@ -85,6 +142,7 @@ def orphan_findings(
     exported: set[tuple[str, str]],
     reachable: set[tuple[str, str]],
     unresolved: set[str],
+    surface: PublicSurface,
     progress: ScanProgress | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
@@ -139,6 +197,7 @@ def orphan_findings(
                         )
                     )
                     continue
+                maybe_api = not is_private_name(binding.name) and surface.covers(index.path, binding.qualname)
                 findings.append(
                     Finding(
                         rule="UNUSED_FUNCTION",
@@ -147,9 +206,9 @@ def orphan_findings(
                         column=binding.column,
                         symbol=binding.name,
                         status="POSSIBLY_DEAD",
-                        confidence=96,
+                        confidence=60 if maybe_api else 96,
                         message=_METHOD_MESSAGE.format(name=binding.name),
-                        evidence=("No references found.",),
+                        evidence=("No references found.", PUBLIC_NAME_NOTE) if maybe_api else ("No references found.",),
                         fingerprint=make_fingerprint("UNUSED_FUNCTION", relpath, binding.qualname),
                     )
                 )
@@ -166,11 +225,13 @@ def class_attribute_findings(
     referenced: set[tuple[str, str]],
     reachable: set[tuple[str, str]],
     unresolved: set[str],
+    surface: PublicSurface,
     progress: ScanProgress | None = None,
 ) -> list[Finding]:
     """Class attributes nobody loads. Dataclass and attrs fields stay quiet."""
     findings: list[Finding] = []
     total = len(project.indexes)
+    owners = _attribute_owners(project, referenced, reachable)
     for number, index in enumerate(project.indexes, start=1):
         relpath = relative_posix(Path(index.path), project.root)
         if progress is not None:
@@ -182,7 +243,7 @@ def class_attribute_findings(
             if _silent_name(binding.name):
                 continue
             class_name = binding.qualname.rsplit(".", 1)[0]
-            if _field_class(index, class_name) or _enum_class(index, class_name):
+            if _declarative_class(project, index, class_name) or _enum_class(index, class_name):
                 continue
             class_binding = classes.get(class_name)
             if class_binding is None or not _class_used(index, class_binding, referenced, reachable):
@@ -191,8 +252,28 @@ def class_attribute_findings(
                 continue
             if _symbol_referenced(project, index, binding, referenced):
                 continue
-            confidence = 60 if binding.name in unresolved else 96
-            evidence = (_UNRESOLVED_NOTE,) if confidence == 60 else ("No references found.",)
+            if binding.name in unresolved and owners.get(binding.name, 0) == 1:
+                # One class defines this name and an attribute with that name is loaded
+                # on a receiver of unknown type.
+                continue
+            confidence: int
+            evidence: tuple[str, ...]
+            if binding.name in unresolved:
+                confidence = 60
+                evidence = (_UNRESOLVED_NOTE,)
+            elif is_private_name(binding.name):
+                confidence = 96
+                evidence = ("No references found.",)
+            elif _has_external_base(project, index, class_name):
+                # A framework base may read a public name by reflection.
+                confidence = 60
+                evidence = ("No references found.", _EXTERNAL_BASE_NOTE)
+            elif surface.covers(index.path, binding.qualname):
+                confidence = 60
+                evidence = ("No references found.", PUBLIC_NAME_NOTE)
+            else:
+                confidence = 96
+                evidence = ("No references found.",)
             findings.append(
                 Finding(
                     rule="UNUSED_VARIABLE",
@@ -208,6 +289,63 @@ def class_attribute_findings(
                 )
             )
     return findings
+
+
+def _attribute_owners(
+    project: Project,
+    referenced: set[tuple[str, str]],
+    reachable: set[tuple[str, str]],
+) -> dict[str, int]:
+    """How many used classes define a class attribute of each name."""
+    counts: dict[str, int] = {}
+    for index in project.indexes:
+        classes = {binding.qualname: binding for binding in index.bindings if binding.kind == "class"}
+        for binding in index.bindings:
+            if binding.kind != "variable" or binding.scope_kind != "class" or "." not in binding.qualname:
+                continue
+            class_binding = classes.get(binding.qualname.rsplit(".", 1)[0])
+            if class_binding is None or not _class_used(index, class_binding, referenced, reachable):
+                continue
+            counts[binding.name] = counts.get(binding.name, 0) + 1
+    return counts
+
+
+def subclass_registry_symbols(project: Project) -> set[tuple[str, str]]:
+    """Subclasses of a class that defines `__init_subclass__`.
+
+    Defining the subclass runs the parent hook, so nothing needs to name it.
+    """
+    hooks: set[tuple[str, str]] = set()
+    for path, bindings in project.bindings.items():
+        for qualname, binding in bindings.items():
+            if binding.kind == "function" and binding.name == "__init_subclass__" and "." in qualname:
+                hooks.add((path, qualname.rsplit(".", 1)[0]))
+    if not hooks:
+        return set()
+    found: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        for class_name, _bases in index.class_bases:
+            ancestors = _class_ancestors(project, index.path, class_name)
+            ancestors.discard((index.path, class_name))
+            if ancestors & hooks:
+                found.add((index.path, class_name))
+    return found
+
+
+def import_hops(project: Project) -> set[tuple[str, str]]:
+    """Import bindings that a resolved call or value chain passes through.
+
+    `pkg.thing()` uses the `thing` that `pkg/__init__.py` imports, even when
+    `__init__.py` never loads the name itself.
+    """
+    _resolved_mentions(project)
+    found: set[tuple[str, str]] = set()
+    for hops in project.follow_hops.values():
+        for path, qualname in hops:
+            binding = project.bindings.get(path, {}).get(qualname)
+            if binding is not None and binding.kind == "import":
+                found.add((path, qualname))
+    return found
 
 
 def _orphan(relpath: str, binding: Binding, confidence: int) -> Finding:
@@ -236,23 +374,60 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
     owners: dict[str, list[tuple[str, str]]] = {}
     seen_classes: set[tuple[str, str]] = set()
 
-    def add(path: str, qualname: str) -> None:
+    def add(path: str, qualname: str) -> bool:
+        """Mark a symbol reached. False when the name matches no definition."""
         if qualname.startswith("@lambda:"):
             queued_marker = (path, qualname)
             if queued_marker in queued:
-                return
+                return True
             queued.add(queued_marker)
             queue.append(queued_marker)
-            return
+            return True
+        if qualname.startswith("@attr:"):
+            unresolved.add(qualname[len("@attr:") :])
+            return True
         resolved = _marker(path, qualname)
         if resolved is None:
-            return
+            return False
         reachable.add(resolved)
         if resolved in queued:
-            return
+            return True
         queued.add(resolved)
         queue.append(resolved)
         _mark_overrides(resolved)
+        return True
+
+    def add_dangling(path: str, call: CallEdge) -> None:
+        """A method call that named no definition may hit a subclass or an unseen receiver."""
+        callee = call.callee
+        if "." in callee and not callee.startswith("@"):
+            class_name, method = callee.rsplit(".", 1)
+            found = False
+            for sub_path, sub_class in _all_subclasses(path, class_name):
+                override = f"{sub_class}.{method}"
+                if override in project.bindings.get(sub_path, {}):
+                    add(sub_path, override)
+                    found = True
+            if found:
+                return
+        if call.callee_name and (
+            not callee.startswith("@") or _import_targets_project(project, path, callee)
+        ):
+            unresolved.add(call.callee_name)
+
+    def _all_subclasses(path: str, class_name: str) -> list[tuple[str, str]]:
+        found: list[tuple[str, str]] = []
+        pending = [(path, class_name)]
+        seen_here: set[tuple[str, str]] = set()
+        while pending:
+            key = pending.pop()
+            for item in subclasses.get(key, ()):
+                if item in seen_here:
+                    continue
+                seen_here.add(item)
+                found.append(item)
+                pending.append(item)
+        return found
 
     def _mark_overrides(resolved: tuple[str, str]) -> None:
         path, qualname = resolved
@@ -353,7 +528,8 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
             add(index.path, call.callee)
             return
         if call.resolved and call.callee:
-            _add_call_target(project, index.path, call, add)
+            if not _add_call_target(project, index.path, call, add, _marker) and call.kind == "method":
+                add_dangling(index.path, call)
             return
         if call.kind == "name" and call.callee_name:
             target = _wildcard_symbol(project, index, call.callee_name)
@@ -370,8 +546,18 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
                 owners.setdefault(name, []).append((key[0], qualname))
         for name in unresolved:
             matches = owners.get(name, [])
-            if len(matches) == 1:
-                add(*matches[0])
+            # One owner is unambiguous. Several owners that share a base are one
+            # polymorphic method, so a call on any receiver can reach all of them.
+            if len(matches) == 1 or (len(matches) > 1 and _share_a_base(project, matches)):
+                for match in matches:
+                    add(*match)
+
+    def add_dunders() -> None:
+        """The interpreter calls `__enter__`, `__call__`, `__iter__` and the like on a used class."""
+        for key in referenced_classes(project, reachable):
+            for name, qualname in project.methods_by_class.get(key, ()):
+                if name.startswith("__") and name.endswith("__"):
+                    add(key[0], qualname)
 
     def add_properties() -> None:
         """Walk `@property` bodies on a used class so calls inside them count."""
@@ -406,6 +592,11 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
 
     for path, qualname in entries.symbols:
         add(path, qualname)
+    for path, class_name in subclass_registry_symbols(project):
+        add(path, class_name)
+        add(path, f"{class_name}.__init__")
+        for _name, method in project.methods_by_class.get((path, class_name), ()):
+            add(path, method)
     opened: set[tuple[str, str]] = set()
     for path, caller in project.value_uses:
         if not deferred(path, caller):
@@ -443,6 +634,7 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
                 consider(index, call)
         before = len(reachable)
         add_unique_methods()
+        add_dunders()
         add_properties()
         add_visitors()
         if len(reachable) != before:
@@ -460,15 +652,70 @@ def referenced_classes(project: Project, reachable: set[tuple[str, str]]) -> set
     return found
 
 
-def _add_call_target(project: Project, path: str, call: CallEdge, add) -> None:
-    add(path, call.callee)
-    binding = project.bindings.get(path, {}).get(call.callee)
-    if binding is not None and binding.kind == "class":
-        add(path, f"{binding.qualname}.__init__")
+def _add_call_target(project: Project, path: str, call: CallEdge, add, resolve) -> bool:
+    found = add(path, call.callee)
+    # The callee may be an import of a class from another file. Constructing it
+    # runs that class's `__init__`, so resolve the import before looking.
+    target = resolve(path, call.callee)
+    binding = project.bindings.get(target[0], {}).get(target[1]) if target is not None else None
+    if target is not None and binding is not None and binding.kind == "class":
+        add(target[0], f"{target[1]}.__init__")
     if call.kind == "method" and call.callee_name in _VISITOR_CALLS and "." in call.callee:
         class_name = call.callee.rsplit(".", 1)[0]
         for qualname in project.visitors.get((path, class_name), ()):
             add(path, qualname)
+    return found
+
+
+def _class_ancestors(project: Project, path: str, class_name: str) -> set[tuple[str, str]]:
+    """The class and every project class it inherits from."""
+    found: set[tuple[str, str]] = set()
+    pending = [(path, class_name)]
+    while pending:
+        current = pending.pop()
+        if current in found:
+            continue
+        found.add(current)
+        index = project.by_path.get(current[0])
+        if index is None:
+            continue
+        for base in project.bases.get(current[0], {}).get(current[1], ()):
+            resolved = _project_base(project, index, base)
+            if resolved is not None:
+                pending.append(resolved)
+    return found
+
+
+def _share_a_base(project: Project, matches: list[tuple[str, str]]) -> bool:
+    common: set[tuple[str, str]] | None = None
+    for path, qualname in matches:
+        ancestors = _class_ancestors(project, path, qualname.rsplit(".", 1)[0])
+        common = ancestors if common is None else common & ancestors
+        if not common:
+            return False
+    return bool(common)
+
+
+def _import_targets_project(project: Project, path: str, callee: str) -> bool:
+    """True when an `@import:` callee names a module or symbol this scan indexed."""
+    if not callee.startswith("@import:"):
+        return False
+    import_qual, _method = _split_import_qualname(callee)
+    if import_qual is None:
+        return False
+    binding = project.bindings.get(path, {}).get(import_qual)
+    if binding is None or binding.kind != "import":
+        return False
+    edge = project.edge_for(path, binding.name, binding.line)
+    if edge is None or edge.is_wildcard:
+        return False
+    module = project.resolve_import(edge.module, edge.level, path)
+    if module is None:
+        return False
+    if edge.imported_name:
+        child = f"{module}.{edge.imported_name}" if module else edge.imported_name
+        return module in project.by_module or child in project.by_module
+    return module in project.by_module
 
 
 def _follow_imports(project: Project, path: str, qualname: str) -> tuple[str, str]:
@@ -482,10 +729,10 @@ def _follow_imports(project: Project, path: str, qualname: str) -> tuple[str, st
         seen.add(current)
         jumped = _jump_import(project, current[0], current[1])
         if jumped is None:
-            project.follow_cache[key] = current
-            return current
+            break
         current = jumped
     project.follow_cache[key] = current
+    project.follow_hops[key] = tuple(seen)
     return current
 
 
@@ -518,7 +765,7 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
             return None
         target_binding = project.module_binding(target.path, method)
         if target_binding is None:
-            return None
+            return _wildcard_symbol(project, target, method)
         return target.path, target_binding.qualname
     if module is None:
         return None
@@ -532,7 +779,12 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
         return None
     target_binding = project.module_binding(target.path, edge.imported_name)
     if target_binding is None:
-        return None
+        reexported = _wildcard_symbol(project, target, edge.imported_name)
+        if reexported is None:
+            return None
+        if method:
+            return reexported[0], f"{reexported[1]}.{method}"
+        return reexported
     if method:
         return target.path, f"{target_binding.qualname}.{method}"
     return target.path, target_binding.qualname
@@ -614,6 +866,11 @@ def _wildcard_symbol(project: Project, index: FileIndex, name: str) -> tuple[str
     return found
 
 
+def reexported_symbol(project: Project, target: FileIndex, name: str) -> tuple[str, str] | None:
+    """Definition `target` re-exports under `name` through a wildcard import."""
+    return _wildcard_symbol(project, target, name)
+
+
 def _decorated(index: FileIndex, qualname: str, names: set[str]) -> bool:
     for item in index.decorators:
         if item.qualname == qualname and item.name.rsplit(".", 1)[-1] in names:
@@ -650,11 +907,53 @@ def _field_class(index: FileIndex, qualname: str) -> bool:
             continue
         if item.name in _FIELD_NAMES or item.name.rsplit(".", 1)[-1] in _FIELD_DECORATORS:
             return True
+    return False
+
+
+# These two have always matched by name, even for a class defined in the project.
+_NAMED_FIELD_BASES = {"BaseModel", "DeclarativeBase"}
+_DECLARATIVE_BASES = {
+    "BaseModel",
+    "BaseSettings",
+    "DeclarativeBase",
+    "DeclarativeBaseNoMeta",
+    "Model",
+    "SQLModel",
+    "Schema",
+    "Serializer",
+    "ModelSerializer",
+    "Form",
+    "ModelForm",
+    "TypedDict",
+    "NamedTuple",
+    "Protocol",
+    "Struct",
+    "Document",
+}
+
+
+def _declarative_class(project: Project, index: FileIndex, qualname: str, _seen: frozenset = frozenset()) -> bool:
+    """A class whose class-level names are framework fields, directly or by inheritance."""
+    if _field_class(index, qualname):
+        return True
+    key = (index.path, qualname)
+    if key in _seen:
+        return False
     for class_name, bases in index.class_bases:
         if class_name != qualname:
             continue
         for base in bases:
-            if _base_leaf(base) in {"BaseModel", "DeclarativeBase"}:
+            if _base_leaf(base) in _NAMED_FIELD_BASES:
+                return True
+            resolved = _project_base(project, index, base)
+            if resolved is None:
+                # Only a base from outside the project can be a framework class.
+                # A project class that happens to be named `Model` is not one.
+                if _base_leaf(base) in _DECLARATIVE_BASES:
+                    return True
+                continue
+            owner = project.by_path.get(resolved[0])
+            if owner is not None and _declarative_class(project, owner, resolved[1], _seen | {key}):
                 return True
     return False
 

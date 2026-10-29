@@ -15,6 +15,8 @@ class _Scope:
         self.global_names: set[str] = set()
         self.nonlocal_names: set[str] = set()
         self.children: list[_Scope] = []
+        # `locals()` or `vars()` in this scope can read every local name.
+        self.reads_locals = False
 
 class _Binding:
     def __init__(
@@ -33,6 +35,8 @@ class _Binding:
         self.column = column
         self.scope = scope
         self.read_count = 0
+        self.typing_only = False
+        self.origin = ""
 
     def freeze(self) -> Binding:
         return Binding(
@@ -44,6 +48,8 @@ class _Binding:
             scope_id=self.scope.id,
             scope_kind=self.scope.kind,
             read_count=self.read_count,
+            typing_only=self.typing_only,
+            origin=self.origin,
         )
 
 class _Load:

@@ -7,12 +7,13 @@ def test_unused_module_caps_a_function(tmp_path):
         tmp_path,
         {
             "main.py": "if __name__ == '__main__':\n    print(1)\n",
-            "lone.py": "def helper():\n    return 1\n",
+            "lone.py": "def helper():\n    return 1\n\ndef _helper():\n    return 2\n",
         },
     )
-    finding = next(item for item in scan(tmp_path).findings if item.symbol == "helper")
-    assert finding.confidence == 82
-    assert "no incoming imports" in finding.evidence[-1]
+    findings = {item.symbol: item for item in scan(tmp_path).findings}
+    assert findings["helper"].confidence == 82
+    assert findings["_helper"].confidence == 82
+    assert "no incoming imports" in findings["_helper"].evidence[-1]
 
 
 def test_dynamic_import_caps_a_function_with_the_module(tmp_path):
@@ -32,16 +33,17 @@ def test_reached_module_keeps_a_high_function_score(tmp_path):
     write_tree(
         tmp_path,
         {
-            "live.py": "def helper():\n    return 1\n",
+            "live.py": "def helper():\n    return 1\n\ndef _helper():\n    return 2\n",
             "main.py": "import live\nif __name__ == '__main__':\n    print(live)\n",
         },
     )
-    finding = next(item for item in scan(tmp_path).findings if item.symbol == "helper")
-    assert finding.confidence == 96
-    assert "no incoming imports" not in " ".join(finding.evidence)
+    findings = {item.symbol: item for item in scan(tmp_path).findings}
+    assert findings["helper"].confidence == 96
+    assert findings["_helper"].confidence == 96
+    assert "no incoming imports" not in " ".join(findings["_helper"].evidence)
 
 
-def test_duplicate_in_a_reached_module_stays_at_90(tmp_path):
+def test_duplicate_in_a_reached_module_stays_below_the_high_gate(tmp_path):
     body = (
         "    item = value\n"
         "    item = item + 1\n"
@@ -66,7 +68,7 @@ def test_duplicate_in_a_reached_module_stays_at_90(tmp_path):
         },
     )
     finding = next(item for item in scan(tmp_path).findings if item.rule == "DUPLICATE_CODE")
-    assert finding.confidence == 90
+    assert finding.confidence == 80
     assert finding.evidence == ("pkg/a.py:save_a",)
 
 
@@ -153,3 +155,76 @@ def test_unreachable_code_is_not_capped(tmp_path):
     )
     finding = next(item for item in scan(tmp_path).findings if item.rule == "UNREACHABLE_CODE")
     assert finding.confidence == 100
+
+
+def test_returned_lambda_is_assumed_to_run(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def select(items):\n"
+                "    def transfunc(item):\n"
+                "        return item\n"
+                "\n"
+                "    class Box:\n"
+                "        pass\n"
+                "\n"
+                "    def unused():\n"
+                "        return 0\n"
+                "\n"
+                "    return lambda item: Box(transfunc(item))\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    select([])\n"
+            ),
+        },
+    )
+    findings = {item.symbol: item for item in scan(tmp_path).findings}
+    assert "transfunc" not in findings
+    assert "Box" not in findings
+    assert findings["unused"].confidence == 100
+    assert findings["unused"].status == "DEAD"
+
+
+def test_called_lambda_reaches_its_target(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def select(items):\n"
+                "    def transfunc(item):\n"
+                "        return item\n"
+                "\n"
+                "    return (lambda item: transfunc(item))(items)\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    select([])\n"
+            ),
+        },
+    )
+    assert [item.symbol for item in scan(tmp_path).findings if item.symbol == "transfunc"] == []
+
+
+def test_type_checking_assignment_is_not_dead(tmp_path):
+    path = tmp_path / "conn.py"
+    path.write_text(
+        "import typing\n"
+        "from typing import TYPE_CHECKING\n"
+        "\n"
+        "class EmscriptenHTTPConnection:\n"
+        "    def __init__(self, host, port):\n"
+        "        self.host = host\n"
+        "\n"
+        "_kept = 1\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    _supports_http_protocol = EmscriptenHTTPConnection('', 0)\n"
+        "    _kept = 2\n"
+        "if TYPE_CHECKING:\n"
+        "    _supports_https_protocol = EmscriptenHTTPConnection('', 0)\n",
+        encoding="utf-8",
+    )
+    symbols = {item.symbol for item in scan(path).findings}
+    assert "_supports_http_protocol" not in symbols
+    assert "_supports_https_protocol" not in symbols
+    assert "EmscriptenHTTPConnection" not in symbols
+    assert "_kept" in symbols

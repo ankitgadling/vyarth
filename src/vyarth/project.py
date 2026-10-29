@@ -31,6 +31,7 @@ class Project:
     module_names_by_path: dict[str, tuple[str, ...]]
     package_parts_by_path: dict[str, tuple[str, ...] | None]
     follow_cache: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
+    follow_hops: dict[tuple[str, str], tuple[tuple[str, str], ...]] = field(default_factory=dict)
     mentions: set[tuple[str, str]] | None = None
 
     def resolve_import(self, module: str | None, level: int, importer: str) -> str | None:

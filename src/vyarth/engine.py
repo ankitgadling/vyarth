@@ -4,17 +4,30 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
+import re
 
 from vyarth.baseline import filter_baselined, load_baseline
 from vyarth.confidence import apply_confidence
 from vyarth.config import Config, load_config
-from vyarth.dependencies import dependency_findings
-from vyarth.discover import discover_files, is_test_path, project_root, read_python_source, relative_posix
+from vyarth.dependencies import dependency_findings, selected_manifests
+from vyarth.discover import discover_scan, is_test_path, project_root, read_python_source, relative_posix
 from vyarth.duplicates import duplicate_findings
 from vyarth.ignore import apply_ignores
-from vyarth.incremental import cache_stamp, changed_python_files, load_cached, prune_cache, store_cached
+from vyarth.incremental import (
+    CacheEntry,
+    cache_stamp,
+    changed_python_files,
+    load_cached,
+    load_result,
+    prune_cache,
+    remember_cached,
+    result_cache_key,
+    store_cached,
+    store_result,
+)
 from vyarth.model import FileIndex, Finding, ParseError, ScanResult
 from vyarth.progress import ScanProgress
 from vyarth.python_index import PythonAstBackend
@@ -65,10 +78,40 @@ def scan(
             return ScanResult(findings=(), errors=(), files_scanned=0)
 
     _status(progress, "finding python files")
-    files = [target] if single_file else discover_files(root, config, within=requested)
+    if single_file:
+        files = [target]
+        manifests: list[Path] = []
+    else:
+        files, found_manifests = discover_scan(root, config, within=requested)
+        manifests = selected_manifests(found_manifests, root, requested)
     fold = config.fold_map()
     if defines:
         fold.update(defines)
+    cache_result = use_cache and not single_file and not overlays
+    result_key = ""
+    if cache_result:
+        result_key = result_cache_key(
+            root,
+            relative_posix(requested, root),
+            _input_stamps(root, files),
+            _input_stamps(root, manifests),
+            _analysis_payload(config, fold),
+        )
+        cached = load_result(root, result_key)
+        if cached is not None:
+            _status(progress, "using cached result")
+            findings, errors, files_scanned = cached
+            return _finish(
+                findings,
+                errors,
+                files_scanned,
+                root,
+                config,
+                baseline,
+                apply_baseline,
+                report_only,
+            )
+
     _status(progress, "indexing files", _index_detail(0, len(files), 0))
     indexes, errors = _index_files(
         files,
@@ -80,6 +123,7 @@ def scan(
         overlays,
         progress,
     )
+    broken_names = _broken_names(root, errors)
 
     # A nested folder that is not a package becomes a root, so `scan examples/app`
     # resolves `import app`. A directory with `__init__.py` keeps its own name.
@@ -96,23 +140,167 @@ def scan(
     )
     _status(progress, "checking dependencies")
     if not single_file:
-        dep_findings, dep_errors = dependency_findings(indexes, root, within=requested, config=config)
+        dep_findings, dep_errors = dependency_findings(
+            indexes,
+            root,
+            within=requested,
+            config=config,
+            manifests=manifests,
+        )
         findings.extend(dep_findings)
         errors.extend(dep_errors)
     _status(progress, "checking duplicate code")
     findings.extend(duplicate_findings(indexes, root, config.duplicate_min_statements))
     findings = apply_confidence(findings, indexes, root)
-    findings = [finding for finding in findings if not is_test_path(finding.path)]
     by_path = {relative_posix(Path(index.path), root): index for index in indexes}
+    if broken_names is None or broken_names:
+        findings = [_soften_for_parse_errors(item, broken_names, by_path) for item in findings]
+    findings = [finding for finding in findings if not is_test_path(finding.path)]
     findings = apply_ignores(findings, by_path, config)
+    if cache_result:
+        store_result(root, result_key, findings, errors, len(indexes))
+    if use_cache and not single_file and requested == root and not overlays:
+        prune_cache(root, {index.path for index in indexes})
+    return _finish(
+        findings,
+        errors,
+        len(indexes),
+        root,
+        config,
+        baseline,
+        apply_baseline,
+        report_only,
+    )
+
+
+_PARSE_ERROR_NOTE = "A file failed to parse, so it may use this symbol."
+_PARSE_SENSITIVE = {
+    "UNUSED_FUNCTION",
+    "UNUSED_CLASS",
+    "ORPHAN_FUNCTION",
+    "POSSIBLY_UNUSED_MODULE",
+    "UNUSED_DEPENDENCY",
+    "UNUSED_VARIABLE",
+}
+
+
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _broken_names(root: Path, errors: list[ParseError]) -> set[str] | None:
+    """Lowercased words in the source files that failed to parse.
+
+    A broken test file, which is often broken on purpose, is ignored. None means
+    a broken file could not be read, so its contents are unknown.
+    """
+    words: set[str] = set()
+    for error in errors:
+        if is_test_path(error.path):
+            continue
+        try:
+            text, _ = read_python_source(root / error.path)
+        except (OSError, UnicodeDecodeError):
+            return None
+        words.update(word.lower() for word in _WORD.findall(text))
+    return words
+
+
+def _soften_for_parse_errors(
+    finding: Finding,
+    broken: set[str] | None,
+    by_path: dict[str, FileIndex],
+) -> Finding:
+    """Drop a claim to 70 only when a file that failed to parse mentions the name it rests on."""
+    if finding.rule not in _PARSE_SENSITIVE or finding.confidence <= 70:
+        return finding
+    if _is_local(finding, by_path):
+        return finding
+    if broken is not None and not _mentioned(finding, broken, by_path):
+        return finding
+    status = "POSSIBLY_DEAD" if finding.status == "DEAD" else finding.status
+    return replace(
+        finding,
+        confidence=70,
+        status=status,
+        evidence=finding.evidence + (_PARSE_ERROR_NOTE,),
+    )
+
+
+def _mentioned(finding: Finding, broken: set[str], by_path: dict[str, FileIndex]) -> bool:
+    if finding.rule == "UNUSED_DEPENDENCY":
+        name = finding.symbol.lower()
+        return bool({name, name.replace("-", "_"), name.replace("-", "")} & broken) or any(
+            part in broken for part in name.split("-") if len(part) > 2
+        )
+    if finding.rule == "POSSIBLY_UNUSED_MODULE":
+        parts = Path(finding.path).with_suffix("").parts
+        return any(part.lower() in broken for part in parts if part != "__init__")
+    prefix = f"{finding.rule}:{finding.path}:"
+    if not finding.fingerprint.startswith(prefix):
+        return True
+    return finding.symbol.lower() in broken
+
+
+def _is_local(finding: Finding, by_path: dict[str, FileIndex]) -> bool:
+    """A name bound inside a function cannot be imported by another file."""
+    prefix = f"{finding.rule}:{finding.path}:"
+    index = by_path.get(finding.path)
+    if index is None or not finding.fingerprint.startswith(prefix):
+        return False
+    qualname = finding.fingerprint[len(prefix) :]
+    return any(item.qualname == qualname and item.scope_kind == "function" for item in index.bindings)
+
+
+def _finish(
+    findings: list[Finding],
+    errors: list[ParseError],
+    files_scanned: int,
+    root: Path,
+    config: Config,
+    baseline: str | Path | None,
+    apply_baseline: bool,
+    report_only: set[str] | None,
+) -> ScanResult:
+    """Apply filters that do not change the analysis itself."""
     findings = _apply_baseline(findings, root, config, baseline, apply_baseline)
     findings = [finding for finding in findings if finding.confidence >= config.min_confidence]
     if report_only is not None:
         findings = [finding for finding in findings if finding.path in report_only]
     findings.sort(key=lambda finding: (finding.path, finding.line, finding.column, finding.rule, finding.symbol))
-    if use_cache and not single_file and requested == root and not overlays:
-        prune_cache(root, {index.path for index in indexes})
-    return ScanResult(findings=tuple(findings), errors=tuple(errors), files_scanned=len(indexes))
+    return ScanResult(findings=tuple(findings), errors=tuple(errors), files_scanned=files_scanned)
+
+
+def _analysis_payload(config: Config, fold: dict[str, str]) -> str:
+    """Config fields that change which names the analysis reports."""
+    payload = {
+        "ignore": list(config.ignore),
+        "exclude": list(config.exclude),
+        "entry_patterns": list(config.entry_patterns),
+        "framework_decorators": list(config.framework_decorators),
+        "entry_points": list(config.entry_points),
+        "fold": sorted(fold.items()),
+        "duplicate_min_statements": config.duplicate_min_statements,
+        "frameworks": list(config.frameworks),
+        "ignore_names": list(config.ignore_names),
+        "ignore_decorators": list(config.ignore_decorators),
+        "ignore_bases": list(config.ignore_bases),
+        "report_dev_dependencies": config.report_dev_dependencies,
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _input_stamps(root: Path, paths: list[Path]) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for path in paths:
+        relative = relative_posix(path, root)
+        try:
+            stat = path.stat()
+        except OSError:
+            rows.append([relative, -1, -1])
+            continue
+        rows.append([relative, stat.st_size, stat.st_mtime_ns])
+    rows.sort()
+    return rows
 
 
 def _index_files(
@@ -127,6 +315,7 @@ def _index_files(
 ) -> tuple[list[FileIndex], list[ParseError]]:
     indexes: list[FileIndex] = []
     errors: list[ParseError] = []
+    queued: list[CacheEntry] = []
     pending: list[tuple[str, str, str | None, str, bool]] = []
     fold_pairs = tuple(sorted(fold.items()))
     total = len(files)
@@ -143,7 +332,7 @@ def _index_files(
                 current = str(file)
                 if cached.path != current:
                     cached = replace(cached, path=current)
-                    store_cached(root, relpath, stamp, cached)
+                    store_cached(root, relpath, stamp, cached, queued)
                 indexes.append(cached)
                 cached_count += 1
                 _status(progress, "indexing files", _index_detail(cached_count, total, cached_count))
@@ -180,7 +369,8 @@ def _index_files(
         if isinstance(payload, FileIndex):
             indexes.append(payload)
             if use_cache and stamp and not overlaid:
-                store_cached(root, relpath, stamp, payload)
+                store_cached(root, relpath, stamp, payload, queued)
+    remember_cached(root, queued)
     return indexes, errors
 
 

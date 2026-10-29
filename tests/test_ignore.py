@@ -82,7 +82,7 @@ def test_min_confidence_filters_possible_modules(tmp_path):
         tmp_path,
         {
             "pkg/__init__.py": "from . import live\nlive\n",
-            "pkg/live.py": "def unused():\n    return 1\n",
+            "pkg/live.py": "def unused():\n    return 1\n\ndef _unused():\n    return 1\n",
             "pkg/orphan.py": "x = 1\n",
             "main.py": "import pkg\nif __name__ == '__main__':\n    print(pkg)\n",
         },
@@ -90,6 +90,8 @@ def test_min_confidence_filters_possible_modules(tmp_path):
     config = load_config(tmp_path)
     high = scan(tmp_path, config=replace(config, min_confidence=90))
     rules = {finding.rule for finding in high.findings}
+    symbols = {finding.symbol for finding in high.findings}
+    assert "_unused" in symbols
     assert "UNUSED_FUNCTION" in rules
     assert "POSSIBLY_UNUSED_MODULE" not in rules
 

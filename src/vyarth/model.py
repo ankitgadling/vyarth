@@ -8,7 +8,14 @@ from typing import Any
 
 # Bump when FileIndex gains fields or the indexer changes meaning.
 # The scan cache mixes this into its stamp so old records are not reused.
-INDEX_VERSION = 11
+INDEX_VERSION = 15
+
+PUBLIC_NAME_NOTE = "Public name. Callers outside this project may still load it."
+
+
+def is_private_name(name: str) -> bool:
+    """True when the name is not part of the importable public surface."""
+    return name.startswith("_")
 
 
 def make_fingerprint(rule: str, path: str, qualname: str) -> str:
@@ -26,6 +33,11 @@ class Binding:
     scope_id: str
     scope_kind: str
     read_count: int
+    typing_only: bool = False
+    # Set when every store of this name is a loop target, an unpacking target,
+    # a `with ... as` name, a comprehension target, or a `match` capture.
+    # Those names are unused by design, so they are not reported.
+    origin: str = ""
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,8 @@ class FileIndex:
     dynamic_imports: tuple[str, ...] = ()
     container_stores: tuple[ContainerStore, ...] = ()
     import_probes: tuple[str, ...] = ()
+    lambda_mentions: tuple[str, ...] = ()
+    module_strings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -171,17 +171,58 @@ def _dotted_name(node: ast.expr) -> str:
     return ""
 
 def _dynamic_symbols(node: ast.Call, name: str) -> tuple[str, ...]:
-    if name in {"getattr", "setattr", "hasattr"} and len(node.args) >= 2:
+    if name in {"getattr", "setattr", "hasattr", "delattr"} and len(node.args) >= 2:
         text = _const_str(node.args[1])
         if text and text.isidentifier():
             return (text,)
+        if text is not None:
+            return ()
+        prefix = _dynamic_prefix(node.args[1])
+        if prefix:
+            return (prefix + "*",)
+        if _is_own_namespace(node.args[0]):
+            return ("*",)
         return ()
+    if name == "globals":
+        return ("*",)
     if name in {"eval", "exec"} and node.args:
         text = _const_str(node.args[0])
         if not text:
             return ()
         return tuple(dict.fromkeys(_DYNAMIC_NAME.findall(text)))
     return ()
+
+def _dynamic_prefix(node: ast.expr) -> str:
+    """Literal start of a built name: `"_handle_" + kind`, `f"cmd_{x}"`, `"on_%s" % x`."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _dynamic_prefix(node.left) or (_const_str(node.left) or "")
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        text = _const_str(node.left)
+        return text.split("%", 1)[0] if text else ""
+    if isinstance(node, ast.JoinedStr) and node.values:
+        first = node.values[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+        return ""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        text = _const_str(node.func.value)
+        return text.split("{", 1)[0] if text else ""
+    text = _const_str(node)
+    return text or ""
+
+
+def _is_own_namespace(node: ast.expr) -> bool:
+    """`self`, `cls`, or `sys.modules[__name__]`: `getattr` there reads this file's own names."""
+    if isinstance(node, ast.Name):
+        return node.id in {"self", "cls", "mcs"}
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+        return node.value.attr == "modules"
+    return False
+
 
 def _string_constants(node: ast.expr) -> set[str]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -252,9 +293,37 @@ def _body_signature(node: ast.FunctionDef | ast.AsyncFunctionDef, minimum: int) 
     count = len(body)
     if count < minimum:
         return "", count
-    tokens = [_shape(statement, _local_names(node)) for statement in body]
-    digest = hashlib.sha256("\n".join(tokens).encode("utf-8")).hexdigest()
+    names = _local_names(node)
+    numbering: dict[str, int] = {}
+    arguments = node.args
+    for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+        numbering.setdefault(arg.arg, len(numbering))
+    for extra in (arguments.vararg, arguments.kwarg):
+        if extra is not None:
+            numbering.setdefault(extra.arg, len(numbering))
+    tokens = [_shape(statement, names, numbering) for statement in body]
+    # Kind, parameter shape, and decorators are part of the identity of the body.
+    header = [
+        type(node).__name__,
+        repr(_parameter_shape(node.args)),
+        repr([_decorator_shape(item) for item in node.decorator_list]),
+    ]
+    digest = hashlib.sha256("\n".join(header + tokens).encode("utf-8")).hexdigest()
     return digest, count
+
+def _parameter_shape(arguments: ast.arguments) -> tuple[int, int, int, bool, bool, int]:
+    return (
+        len(arguments.posonlyargs),
+        len(arguments.args),
+        len(arguments.kwonlyargs),
+        arguments.vararg is not None,
+        arguments.kwarg is not None,
+        len([item for item in arguments.defaults if item is not None]),
+    )
+
+def _decorator_shape(node: ast.expr) -> str:
+    current = node.func if isinstance(node, ast.Call) else node
+    return _dotted_name(current)
 
 def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
     """Parameters and names stored in the function. Free names stay in the hash."""
@@ -273,9 +342,12 @@ def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]
             names.add(child.name)
     return frozenset(names)
 
-def _shape(node: ast.AST, local_names: frozenset[str]) -> str:
+def _shape(node: ast.AST, local_names: frozenset[str], numbering: dict[str, int]) -> str:
     if isinstance(node, ast.Name):
-        return "Name" if node.id in local_names else f"Global:{node.id}"
+        if node.id not in local_names:
+            return f"Global:{node.id}"
+        # Local names are renamed by first appearance, so `a - b` and `b - a` differ.
+        return f"Local{numbering.setdefault(node.id, len(numbering))}"
     if isinstance(node, ast.Constant):
         return f"Const:{node.value!r}"
     if isinstance(node, ast.arg):
@@ -285,9 +357,11 @@ def _shape(node: ast.AST, local_names: frozenset[str]) -> str:
         if field in {"lineno", "col_offset", "end_lineno", "end_col_offset", "ctx", "type_comment", "decorator_list"}:
             continue
         if isinstance(value, ast.AST):
-            parts.append(_shape(value, local_names))
+            parts.append(_shape(value, local_names, numbering))
         elif isinstance(value, list):
-            bits = [_shape(item, local_names) if isinstance(item, ast.AST) else repr(item) for item in value]
+            bits = [
+                _shape(item, local_names, numbering) if isinstance(item, ast.AST) else repr(item) for item in value
+            ]
             parts.append("[" + ",".join(bits) + "]")
         else:
             parts.append(repr(value))
@@ -657,7 +731,9 @@ def _walk_inside(
 ) -> None:
     if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
         stack.append(statement.name)
+        before = len(spans)
         _walk_block(statement.body, stack, spans, source)
+        _drop_sole_yield(statement, stack, spans, before)
         stack.pop()
         return
     if isinstance(statement, ast.ClassDef):
@@ -668,8 +744,9 @@ def _walk_inside(
     if isinstance(statement, ast.If):
         truth = _const_bool(statement.test)
         if truth is False:
-            for inner in statement.body:
-                _record(inner, stack, spans, source)
+            if not _is_typing_idiom(statement):
+                for inner in statement.body:
+                    _record(inner, stack, spans, source)
             _walk_block(statement.orelse, stack, spans, source)
         elif truth is True:
             _walk_block(statement.body, stack, spans, source)
@@ -723,6 +800,47 @@ def _walk_inside(
     if isinstance(statement, ast.Match):
         for case in statement.cases:
             _walk_block(case.body, stack, spans, source)
+
+def _is_typing_idiom(statement: ast.If) -> bool:
+    """`if False:` holding only imports is the pre-TYPE_CHECKING way to import names for type comments."""
+    if not isinstance(statement.test, ast.Constant):
+        return False
+    return bool(statement.body) and all(isinstance(item, ast.Import | ast.ImportFrom) for item in statement.body)
+
+
+def _drop_sole_yield(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    stack: list[str],
+    spans: list[UnreachableSpan],
+    before: int,
+) -> None:
+    """The only yield keeps the function a generator, so it is not dead code."""
+    yields = _owned_yields(function)
+    if len(yields) != 1:
+        return
+    line = yields[0].lineno
+    qualname = ".".join(stack)
+    spans[before:] = [
+        span
+        for span in spans[before:]
+        if not (span.scope_qualname == qualname and span.line == line)
+    ]
+
+
+def _owned_yields(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Yield | ast.YieldFrom]:
+    found: list[ast.Yield | ast.YieldFrom] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+                continue
+            if isinstance(child, ast.Yield | ast.YieldFrom):
+                found.append(child)
+            walk(child)
+
+    walk(function)
+    return found
+
 
 def _record(
     statement: ast.stmt,

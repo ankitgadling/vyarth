@@ -210,12 +210,12 @@ def test_cache_markers_and_prune(tmp_path):
     assert "Signature:" in (tmp_path / ".vyarth" / "CACHEDIR.TAG").read_text(encoding="utf-8")
     (tmp_path / "b.py").unlink()
     scan(tmp_path)
-    stored = []
-    for path in (tmp_path / ".vyarth" / "cache").rglob("*.json"):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        stored.append(payload["index"]["path"])
+    stored = _cached_index_paths(tmp_path)
     assert all(not item.endswith("b.py") for item in stored)
     assert any(item.endswith("a.py") for item in stored)
+    manifest = json.loads((tmp_path / ".vyarth" / "cache" / "manifest.json").read_text(encoding="utf-8"))
+    assert "b.py" not in manifest["files"]
+    assert "a.py" in manifest["files"]
 
 
 def test_cache_keeps_findings_after_the_project_moves(tmp_path):
@@ -244,10 +244,7 @@ def test_cache_keeps_findings_after_the_project_moves(tmp_path):
     assert len(spare) == 1
     assert spare[0].path == "app/service.py"
     assert not any(item.symbol == "run" for item in result.findings)
-    stored = []
-    for path in (moved / ".vyarth" / "cache").rglob("*.json"):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        stored.append(payload["index"]["path"])
+    stored = _cached_index_paths(moved)
     assert stored
     assert all(str(moved) in item for item in stored)
 
@@ -376,3 +373,157 @@ def test_lsp_publishes_diagnostics(tmp_path):
     body = out.getvalue().decode("utf-8")
     assert "textDocument/publishDiagnostics" in body
     assert "UNUSED_FUNCTION" in body
+
+
+def _cached_index_paths(root) -> list[str]:
+    stored = []
+    for path in (root / ".vyarth" / "cache").rglob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        index = payload.get("index") if isinstance(payload, dict) else None
+        if isinstance(index, dict) and isinstance(index.get("path"), str):
+            stored.append(index["path"])
+    return stored
+
+
+def _forbid_reparse(monkeypatch) -> None:
+    def deny(*_args, **_kwargs):
+        raise AssertionError("cached scan parsed a file")
+
+    monkeypatch.setattr("vyarth.engine.PythonAstBackend.index_source", deny)
+    monkeypatch.setattr("vyarth.engine.load_cached", deny)
+
+
+def test_unchanged_scan_reuses_findings_without_parsing(tmp_path, monkeypatch):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def public():\n"
+                "    return 1\n"
+                "\n"
+                "def _private():\n"
+                "    return 2\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    pass\n"
+            ),
+        },
+    )
+    first = scan(tmp_path)
+    _forbid_reparse(monkeypatch)
+    second = scan(tmp_path)
+    assert second.findings == first.findings
+    assert second.errors == first.errors
+    assert second.files_scanned == first.files_scanned
+    assert {item.symbol: item.confidence for item in second.findings} == {"public": 96, "_private": 96}
+    assert all(item.evidence for item in second.findings)
+
+
+def test_editing_a_reached_function_invalidates_the_result(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def helper():\n"
+                "    return 1\n"
+                "\n"
+                "def main():\n"
+                "    return helper()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    assert not any(item.symbol == "helper" for item in scan(tmp_path).findings)
+    (tmp_path / "app.py").write_text(
+        "def helper():\n    return 1\n\ndef main():\n    return 1\n\nif __name__ == '__main__':\n    main()\n",
+        encoding="utf-8",
+    )
+    assert any(item.symbol == "helper" for item in scan(tmp_path).findings)
+
+
+def test_editing_pyproject_dependencies_invalidates_the_result(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'demo'\nversion = '0'\ndependencies = []\n",
+            "app.py": "def used():\n    return 1\n\nif __name__ == '__main__':\n    used()\n",
+        },
+    )
+    assert not any(item.rule == "UNUSED_DEPENDENCY" for item in scan(tmp_path).findings)
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\nversion = '0'\ndependencies = ['requests']\n",
+        encoding="utf-8",
+    )
+    dependencies = {item.symbol for item in scan(tmp_path).findings if item.rule == "UNUSED_DEPENDENCY"}
+    assert "requests" in dependencies
+
+
+def test_example_requirements_edit_does_not_reparse(tmp_path, monkeypatch):
+    write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\nname = 'demo'\nversion = '0'\n",
+            "app.py": "def used():\n    return 1\n\nif __name__ == '__main__':\n    used()\n",
+            "examples/celery/requirements.txt": "amqp\n",
+            "node_modules/left-pad/requirements.txt": "leftpad\n",
+        },
+    )
+    first = scan(tmp_path)
+    assert not any(item.symbol in {"amqp", "leftpad"} for item in first.findings)
+    (tmp_path / "examples" / "celery" / "requirements.txt").write_text("kombu\n", encoding="utf-8")
+    _forbid_reparse(monkeypatch)
+    second = scan(tmp_path)
+    assert second.findings == first.findings
+    assert not any(item.symbol in {"amqp", "kombu", "leftpad"} for item in second.findings)
+
+
+def test_cached_scan_replays_confidence_baseline_and_changed(tmp_path, monkeypatch):
+    write_tree(
+        tmp_path,
+        {
+            "a.py": "def public():\n    return 1\n\ndef _private():\n    return 2\n\nif __name__ == '__main__':\n    pass\n",
+            "b.py": "def other():\n    return 3\n\nif __name__ == '__main__':\n    pass\n",
+        },
+    )
+    first = scan(tmp_path)
+    from vyarth.baseline import write_baseline
+
+    baseline = tmp_path / "baseline.json"
+    write_baseline(baseline, [item for item in first.findings if item.path == "b.py"])
+    _forbid_reparse(monkeypatch)
+    assert {item.symbol for item in scan(tmp_path, min_confidence=90).findings} == {"public", "_private", "other"}
+    narrowed = scan(tmp_path, min_confidence=97)
+    assert not narrowed.findings
+    assert narrowed.files_scanned == first.files_scanned
+    baselined = scan(tmp_path, baseline=baseline)
+    assert not any(item.path == "b.py" for item in baselined.findings)
+    assert any(item.symbol == "public" for item in baselined.findings)
+    monkeypatch.setattr("vyarth.engine.changed_python_files", lambda *_args, **_kwargs: {"a.py"})
+    changed = scan(tmp_path, changed=True)
+    assert {item.path for item in changed.findings} == {"a.py"}
+    assert changed.files_scanned == first.files_scanned
+
+
+def test_defines_change_invalidates_the_result(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app.py": (
+                "def dead():\n"
+                "    return 1\n"
+                "\n"
+                "def main():\n"
+                "    if COUNT == 1:\n"
+                "        dead()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    reached = scan(tmp_path, defines={"COUNT": "1"})
+    assert not any(item.symbol == "dead" for item in reached.findings)
+    folded = scan(tmp_path, defines={"COUNT": "0"})
+    assert any(item.symbol == "dead" for item in folded.findings)

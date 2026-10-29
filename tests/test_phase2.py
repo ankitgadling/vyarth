@@ -73,7 +73,7 @@ def test_getattr_lowers_unused_function_confidence(tmp_path):
         tmp_path,
         {
             "app.py": (
-                "def helper():\n"
+                "def _helper():\n"
                 "    return 1\n"
                 "\n"
                 "def main():\n"
@@ -86,7 +86,7 @@ def test_getattr_lowers_unused_function_confidence(tmp_path):
             ),
         },
     )
-    finding = next(item for item in scan(tmp_path).findings if item.symbol == "helper")
+    finding = next(item for item in scan(tmp_path).findings if item.symbol == "_helper")
     assert finding.rule == "UNUSED_FUNCTION"
     assert finding.status == "POSSIBLY_DEAD"
     assert finding.confidence == 96

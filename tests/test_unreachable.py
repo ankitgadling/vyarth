@@ -1,5 +1,6 @@
 from vyarth import scan
 from vyarth.fix import apply_fixes, is_fixable
+from vyarth.model import Finding
 
 
 def _unreachable(tmp_path, source: str) -> list[str]:
@@ -129,10 +130,24 @@ def test_fix_keeps_the_yield_that_makes_a_generator(tmp_path):
     path.write_text(source, encoding="utf-8")
     result = scan(tmp_path)
     yields = [finding for finding in result.findings if finding.rule == "UNREACHABLE_CODE" and "yield" in finding.symbol]
-    assert len(yields) == 1
-    assert is_fixable(yields[0], source) is False
+    assert yields == []
     apply_fixes(tmp_path, result.findings)
-    assert "yield b''" in path.read_text(encoding="utf-8")
+    assert path.read_text(encoding="utf-8") == source
+    stale = Finding(
+        rule="UNREACHABLE_CODE",
+        path="mod.py",
+        line=3,
+        column=5,
+        symbol="yield b''",
+        status="DEAD",
+        confidence=100,
+        message="Control flow terminates before this statement.",
+        evidence=("Control flow terminates before this statement.",),
+        fingerprint="UNREACHABLE_CODE:mod.py:gen",
+    )
+    assert is_fixable(stale, source) is False
+    apply_fixes(tmp_path, [stale])
+    assert path.read_text(encoding="utf-8") == source
 
 
 def test_fix_deletes_an_extra_unreachable_yield(tmp_path):
@@ -146,10 +161,24 @@ def test_fix_deletes_an_extra_unreachable_yield(tmp_path):
         "gen()\n",
         encoding="utf-8",
     )
-    apply_fixes(tmp_path, scan(tmp_path).findings)
+    result = scan(tmp_path)
+    yields = [finding for finding in result.findings if finding.rule == "UNREACHABLE_CODE" and "yield" in finding.symbol]
+    assert [finding.symbol.strip() for finding in yields] == ["yield 2"]
+    apply_fixes(tmp_path, result.findings)
     text = path.read_text(encoding="utf-8")
     assert "yield 1" in text
     assert "yield 2" not in text
+
+
+def test_only_yield_in_an_empty_loop_is_not_unreachable(tmp_path):
+    assert _unreachable(
+        tmp_path,
+        "def gen():\n"
+        "    for _ in ():\n"
+        "        yield\n"
+        "\n"
+        "gen()\n",
+    ) == []
 
 
 def test_assert_does_not_end_the_block(tmp_path):

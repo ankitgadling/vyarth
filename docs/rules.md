@@ -7,15 +7,15 @@ Each finding has a rule, a status, a confidence from 0 to 100, a message, eviden
 | Rule | Meaning | Confidence | Status |
 | --- | --- | --- | --- |
 | `UNUSED_IMPORT` | Import name never loaded | 100, or 70 for a dynamic import, an `ImportError` probe, a possible `__init__.py` re-export, or a dotted side-effect import | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 96 at module level or on a used class, 60 when the class has an external base, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 96 at module level, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNUSED_VARIABLE` | Module, class, or function variable never read | 100 in a function or at module level, 96 for an unreferenced attribute on a used class, 70 or 60 when a dynamic or unresolved call uses the name | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
-| `UNREACHABLE_CODE` | Statement after an exit, or a literal `False` branch | 100 | `DEAD` |
+| `UNUSED_FUNCTION` | Function or method never loaded | 100 nested, 60 when only a lambda mentions it, 96 when the name is private or public, 60 when the name may be public API, 60 when the class has an external base, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
+| `UNUSED_CLASS` | Class never loaded, including as a base class | 100 nested, 60 when only a lambda mentions it, 96 when the name is private or public, 60 when the name may be public API, 75 when decorated but not an entry, 70 when a dynamic call names it | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
+| `UNUSED_VARIABLE` | Module, class, or function variable never read | 100 in a function or for a private module-level name, 96 for a public module-level name, 96 for an attribute on a used class, 60 for a public name that may be API, 70 or 60 when a dynamic or unresolved call uses the name | `DEAD` at 100, otherwise `POSSIBLY_DEAD` |
+| `UNREACHABLE_CODE` | Statement after an exit, or a literal `False` branch. The only `yield` in a function is omitted | 100 | `DEAD` |
 | `ORPHAN_FUNCTION` | Referenced, but no entry point reaches it | 80, or 60 when an unresolved attribute call uses the name | `POSSIBLY_DEAD` |
 | `POSSIBLY_UNUSED_MODULE` | No entry module can import this file | 82, or 60 when the project imports dynamically | `POSSIBLY_UNUSED_MODULE` |
-| `WILDCARD_IMPORT` | `from module import *` limits analysis | 100 | `ANALYSIS_LIMIT` |
+| `WILDCARD_IMPORT` | `from module import *` limits analysis | 60 | `ANALYSIS_LIMIT` |
 | `UNUSED_DEPENDENCY` | Declared package with no import | 95, or 70 when the import name differs, the match is only a shared top-level namespace, distribution metadata is unavailable, or the package is a runtime-only or reported development dependency | `POSSIBLY_DEAD` |
-| `DUPLICATE_CODE` | Function body matches another function | 90 | `POSSIBLY_DUPLICATE` |
+| `DUPLICATE_CODE` | Function body matches another function | 80 | `POSSIBLY_DUPLICATE` |
 
 Findings inside a possibly unused module do not score above that module, except `UNREACHABLE_CODE`, which stays at 100. Those findings disappear with the module under `--min-confidence 90`. When that cap, or the Alembic adjustment, lowers a `DEAD` finding below 100, the status becomes `POSSIBLY_DEAD`. `POSSIBLY_DUPLICATE` and `ANALYSIS_LIMIT` stay as they are.
 
@@ -25,13 +25,13 @@ A load is a read: a call, a decorator, passing the name as a value, or using it 
 
 The name `_` and dunder names such as `__all__` are not reported. Parameters are indexed and not reported.
 
-`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, the first argument of `Annotated`, or a `|` expression does too. So does the first argument of `cast("Fraction", value)`. A string inside `Literal`, or later `Annotated` metadata, does not.
+`import pandas as pd` and `from pandas import DataFrame` follow the alias. `from __future__ import ...` is treated as used. `from module import Name as Name` is a public re-export: the import is used, and the original definition stays alive. An attribute on an imported submodule, such as `types.OptionHelpExtra`, loads that name. A quoted name inside `Union`, `Optional`, `Callable`, the first argument of `Annotated`, a `|` expression, or the value of a `TypeAlias` does too. So does the first argument of `cast("Fraction", value)`. A string inside `Literal`, or later `Annotated` metadata, does not.
 
 A name listed in `__all__` is used. So is a name that another project module imports and then loads: a call, an annotation, or another `__all__` entry. An import that nothing in the importing file loads does not keep the original definition alive. Passing a function as a value (`handlers.append(foo)`) is a use.
 
 ## `UNUSED_FUNCTION` and `UNUSED_CLASS`
 
-A module-level function or class with no references is `POSSIBLY_DEAD` at 96% when an entry module can import that file. The text report lists the checks under `Evidence:`:
+A private module-level function or class with no references is `POSSIBLY_DEAD` at 96% when an entry module can import that file. A public name, one that does not start with `_`, also scores 96% when the project is an application (a console script, `__main__.py`, a framework callback, or a top-level script with a main guard; `docs/conf.py`, `setup.py`, examples, and package-internal main guards do not count), because callers inside the project would show up as references. It scores 60% when outside code may load it: the project has no entry point of its own (a library), or a package `__init__.py` or an `__all__` list exposes the name. The text report lists the checks under `Evidence:`:
 
 - No references found.
 - No decorators.
@@ -41,7 +41,7 @@ A module-level function or class with no references is `POSSIBLY_DEAD` at 96% wh
 
 A nested function with no dynamic name and no decorator stays at 100%.
 
-An unreferenced method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` A method on a class that has a base outside the project scores 60 instead, with evidence that it may override a method of that external base. That includes a dotted base such as `threading.Thread` or `json.JSONEncoder`, a builtin such as `dict` or `Exception`, a name assigned in the module, and a subscript or call such as `Generic[T]` or `with_metaclass(...)`. `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
+An unreferenced private method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` A public method scores 96 too, or 60 when the project is a library or the class is exposed by an `__init__.py` or `__all__`, with evidence that callers outside this project may still load it. A method on a class that has a base outside the project scores 60 instead, with evidence that it may override a method of that external base. That includes a dotted base such as `threading.Thread` or `json.JSONEncoder`, a builtin such as `dict` or `Exception`, a name assigned in the module, and a subscript or call such as `Generic[T]` or `with_metaclass(...)`. `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
 
 A decorator that is not a recognized entry lowers the score to 75%, including a nested function. `@property`, `@staticmethod`, and `@classmethod` are recorded and are not entries by themselves. See [How analysis works](how-analysis-works.md) for the decorator list.
 
@@ -51,9 +51,9 @@ A literal name passed to `getattr`, `setattr`, `eval`, or `exec` lowers that nam
 
 ## `UNUSED_VARIABLE`
 
-A function-local assignment that nothing reads is 100%. A module-level name that nothing reads is 100% unless a dynamic call names it, which lowers it to 70%.
+A function-local assignment that nothing reads is 100%. A loop target, an unpacking target, a `with ... as` name, a comprehension target, and a local whose name starts with `_` are never reported. `locals()` or `vars()` with no argument marks every local in the function as read. A private module-level name that nothing reads is 100%. A public module-level name scores 60, unless a dynamic call names it, which lowers it to 70%.
 
-A plain class attribute that nothing loads, on a class that is used, is `UNUSED_VARIABLE` at 96. An unresolved `obj.name()` anywhere lowers an attribute of that name to 60. `@dataclass` and attrs classes are left alone, so their fields are not reported. Members of `Enum`, `IntEnum`, `StrEnum`, `Flag`, and `IntFlag` are left alone too. Methods on those classes are still reported.
+An attribute that nothing loads, on a class that is used, is `UNUSED_VARIABLE` at 96. A public attribute scores 60 when the project is a library, the class is exposed through `__init__.py` or `__all__`, or the class has a base outside the project. An unresolved `obj.name()` anywhere lowers an attribute of that name to 60. `@dataclass` and attrs classes are left alone, so their fields are not reported. Members of `Enum`, `IntEnum`, `StrEnum`, `Flag`, and `IntFlag` are left alone too. Methods on those classes are still reported. Fields of a class that inherits, directly or through a project class, from `BaseModel`, `NamedTuple`, `TypedDict`, `Protocol`, a Django or SQLAlchemy model, and similar declarative bases are left alone. A class attribute on any other class with a base the scan cannot see scores 60 at most. A class attribute loaded as `type(self).name` or `self.__class__.name`, or incremented with `+=`, counts as read.
 
 ## `UNUSED_IMPORT`
 
@@ -86,7 +86,7 @@ Scanning a single file skips this rule.
 
 ## `WILDCARD_IMPORT`
 
-`from module import *` is reported so you can see where analysis is incomplete. The imported names are still treated as possible references when the target module is in the project.
+`from module import *` is reported so you can see where analysis is incomplete. It scores 60% because the import is not unused code. The imported names are still treated as possible references when the target module is in the project.
 
 ## `UNUSED_DEPENDENCY`
 
@@ -103,15 +103,17 @@ Names are compared with [PEP 503](https://peps.python.org/pep-0503/) normalizati
 
 When `importlib.metadata.packages_distributions()` lists the declared distribution, a package is used if it is the only distribution that provides an imported top-level module. A top-level shared by more than one installed distribution, such as `google`, does not mark every one of those distributions used. A dotted import such as `google.protobuf` counts as a use of the installed distribution whose files contain that module. A hyphenated name that equals an imported module, or matches on a dotted boundary such as `zope.interface` or `google.cloud.storage`, is used. A top-level-only overlap, such as `import google` against `google-cloud-storage`, stays a finding at 70, with evidence that the namespace was imported. A declared distribution that is not installed in the interpreter running Vyarth scores 70, with evidence that distribution metadata is unavailable.
 
-Packages that are often started without an import stay reported at 70, not 95: `gunicorn`, `uvicorn`, `hypercorn`, `daphne`, `waitress`, `gevent`, `eventlet`, `psycopg`, `psycopg2`, `psycopg2-binary`, `mysqlclient`, `pymysql`, `asyncpg`, `redis`, `hiredis`, and `whitenoise`.
+Packages that are often started without an import stay reported at 70, not 95: `gunicorn`, `uvicorn`, `hypercorn`, `daphne`, `waitress`, `gevent`, `eventlet`, `psycopg`, `psycopg2`, `psycopg2-binary`, `mysqlclient`, `pymysql`, `asyncpg`, `redis`, `hiredis`, `whitenoise`, `python-multipart`, `uvloop`, `httptools`, and `email-validator`.
+
+Tools and plugins that run without an import also score 70: `black`, `flake8`, `mypy`, `pylint`, `ruff`, `isort`, `pytest`, `coverage`, `tox`, `nox`, `pre-commit`, `setuptools`, `wheel`, `pip`, `pip-tools`, `twine`, `build`, `bandit`, `pyright`, `autopep8`, `yapf`, `sphinx`, `mkdocs`, and anything named `pytest-*`, `flake8-*`, `types-*`, `mypy-*`, `pylint-*`, `sphinx-*`, `mkdocs-*`, `*-stubs`, or `django-stubs*`. A package whose import name appears as a string in the source, as in `INSTALLED_APPS = ["rest_framework"]`, also scores 70.
 
 A package declared only in a development or docs manifest is not reported. That covers `requirements-dev.txt`, `docs/requirements.txt`, `[dependency-groups]`, a Poetry group, uv `dev-dependencies`, Pipfile `dev-packages`, and a `[project.optional-dependencies]` group named `dev`, `test`, `tests`, `docs`, `doc`, `lint`, or ending in `-dev`. Set `report_dev_dependencies = true` to report those at 70%. Other optional extras stay at 95% when nothing imports them. A runtime package that is installed in this interpreter and has no matching import stays at 95%, with the message `No Python imports found.`
 
-Scanning a single file skips this rule. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt`, or a manifest excluded by config or `.gitignore`. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
+Scanning a single file skips this rule. A scan of the project root skips manifests under `examples/`, `example/`, `tutorial/`, `tutorials/`, `samples/`, `sample/`, `demo/`, `demos/`, `benchmarks/`, or `benchmark/`. Nested package manifests, such as `packages/foo/pyproject.toml`, still count, and so does `docs/requirements.txt`. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt` when the scan path is `src`, or a manifest excluded by config or `.gitignore`. Scanning the examples directory itself reports that directory's manifest. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
 
 ## `DUPLICATE_CODE`
 
-Duplicate detection hashes statement shape and constants. Names bound in the function (parameters and assignments) are ignored. Free names, including called functions such as `min` and `max`, stay in the hash. Two bodies match only when they are structurally the same and at least `duplicate_min_statements` long (default 5). The first copy, in path and line order, is the origin. Later copies are reported at 90% with status `POSSIBLY_DUPLICATE` and a message such as `Function 'format_row' duplicates pkg/a.py:format_row`. Test modules are not compared.
+Duplicate detection hashes statement shape and constants. Names bound in the function (parameters and assignments) are ignored. Free names, including called functions such as `min` and `max`, stay in the hash. Two bodies match only when they are structurally the same and at least `duplicate_min_statements` long (default 5). The first copy, in path and line order, is the origin. Later copies are reported at 80% with status `POSSIBLY_DUPLICATE` and a message such as `Function 'format_row' duplicates pkg/a.py:format_row`. That score stays out of `--fail-on high`. Test modules are not compared.
 
 ## Suppress a finding
 

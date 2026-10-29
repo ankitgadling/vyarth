@@ -58,7 +58,7 @@ def test_wildcard_import_is_an_analysis_limit(tmp_path):
     assert wildcard.symbol == "os.*"
     assert wildcard.status == "ANALYSIS_LIMIT"
     assert wildcard.message == "Wildcard import prevents reliable analysis."
-    assert wildcard.confidence == 100
+    assert wildcard.confidence == 60
     assert any(finding.rule == "UNUSED_IMPORT" and finding.symbol == "json" for finding in result.findings)
 
 
