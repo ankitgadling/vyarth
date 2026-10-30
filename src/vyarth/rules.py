@@ -204,28 +204,25 @@ def _cross_module_uses(project: Project) -> tuple[set[tuple[str, str]], set[tupl
         elif marker in seen_all:
             continue
         seen_all.add(marker)
-        origin = _import_origin(project, index, binding)
-        if origin is None:
-            continue
-        module, symbol = origin
-        target = project.by_module.get(module)
-        if target is None:
-            continue
-        target_binding = project.module_binding(target.path, symbol)
-        if target_binding is None:
-            hit = reexported_symbol(project, target, symbol)
-            if hit is None:
+        for module, symbol in _import_origins(project, index, binding):
+            target = project.by_module.get(module)
+            if target is None:
                 continue
-            target = project.by_path[hit[0]]
-            target_binding = project.bindings.get(hit[0], {}).get(hit[1])
+            target_binding = project.module_binding(target.path, symbol)
             if target_binding is None:
-                continue
-        reached = (target.path, target_binding.qualname)
-        referenced.add(reached)
-        if from_export:
-            exported_targets.add(reached)
-        if target_binding.kind == "import":
-            queue.append((target, target_binding, from_export))
+                hit = reexported_symbol(project, target, symbol)
+                if hit is None:
+                    continue
+                target = project.by_path[hit[0]]
+                target_binding = project.bindings.get(hit[0], {}).get(hit[1])
+                if target_binding is None:
+                    continue
+            reached = (target.path, target_binding.qualname)
+            referenced.add(reached)
+            if from_export:
+                exported_targets.add(reached)
+            if target_binding.kind == "import":
+                queue.append((target, target_binding, from_export))
     return referenced, exported_targets
 
 
@@ -235,14 +232,23 @@ def _locally_used(index: FileIndex, binding: Binding) -> bool:
     return binding.scope_kind == "module" and binding.name in index.exports
 
 
-def _import_origin(project: Project, index: FileIndex, binding: Binding) -> tuple[str, str] | None:
-    edge = project.edge_for(index.path, binding.name, binding.line)
-    if edge is None or edge.is_wildcard or not edge.imported_name or edge.imported_name == "*":
-        return None
-    module = project.resolve_import(edge.module, edge.level, index.path)
-    if not module:
-        return None
-    return module, edge.imported_name
+def _import_origins(project: Project, index: FileIndex, binding: Binding) -> list[tuple[str, str]]:
+    """Modules and names this import binding can load.
+
+    A second import of the same name, as in an ``if``/``else`` or ``try``/``except``,
+    is another edge on the same binding. A use of the name reaches every one.
+    """
+    found: list[tuple[str, str]] = []
+    for edge in project.edges_for_binding(index.path, binding):
+        if edge.is_wildcard or not edge.imported_name or edge.imported_name == "*":
+            continue
+        module = project.resolve_import(edge.module, edge.level, index.path)
+        if not module:
+            continue
+        item = (module, edge.imported_name)
+        if item not in found:
+            found.append(item)
+    return found
 
 
 def _wildcard_findings(index: FileIndex, relpath: str) -> list[Finding]:

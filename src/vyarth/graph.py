@@ -11,7 +11,16 @@ from vyarth.config import Config
 from vyarth.discover import relative_posix
 from vyarth.entries import EntrySet
 from vyarth.flow import container_targets, held_elements, _module_function, _module_named
-from vyarth.model import PUBLIC_NAME_NOTE, Binding, CallEdge, FileIndex, Finding, is_private_name, make_fingerprint
+from vyarth.model import (
+    PUBLIC_NAME_NOTE,
+    Binding,
+    CallEdge,
+    FileIndex,
+    Finding,
+    ImportEdge,
+    is_private_name,
+    make_fingerprint,
+)
 from vyarth.progress import ScanProgress
 from vyarth.project import Project, call_is_dead
 
@@ -371,6 +380,7 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
     unresolved: set[str] = set()
     queue: list[tuple[str, str]] = []
     queued: set[tuple[str, str]] = set()
+    fanout_seen: set[tuple[str, str]] = set()
     owners: dict[str, list[tuple[str, str]]] = {}
     seen_classes: set[tuple[str, str]] = set()
 
@@ -386,6 +396,15 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
         if qualname.startswith("@attr:"):
             unresolved.add(qualname[len("@attr:") :])
             return True
+        if (path, qualname) not in fanout_seen:
+            alternatives = _alternate_import_targets(project, path, qualname)
+            if len(alternatives) > 1:
+                # One name imported on more than one branch reaches each definition.
+                fanout_seen.add((path, qualname))
+                reached_any = False
+                for alt_path, alt_name in alternatives:
+                    reached_any = add(alt_path, alt_name) or reached_any
+                return reached_any
         resolved = _marker(path, qualname)
         if resolved is None:
             return False
@@ -656,10 +675,17 @@ def _add_call_target(project: Project, path: str, call: CallEdge, add, resolve) 
     found = add(path, call.callee)
     # The callee may be an import of a class from another file. Constructing it
     # runs that class's `__init__`, so resolve the import before looking.
-    target = resolve(path, call.callee)
-    binding = project.bindings.get(target[0], {}).get(target[1]) if target is not None else None
-    if target is not None and binding is not None and binding.kind == "class":
-        add(target[0], f"{target[1]}.__init__")
+    # A name imported on more than one branch constructs each of those classes.
+    alternatives = _alternate_import_targets(project, path, call.callee)
+    targets = alternatives if len(alternatives) > 1 else []
+    if not targets:
+        target = resolve(path, call.callee)
+        if target is not None:
+            targets = [target]
+    for alt_path, alt_name in targets:
+        binding = project.bindings.get(alt_path, {}).get(alt_name)
+        if binding is not None and binding.kind == "class":
+            add(alt_path, f"{alt_name}.__init__")
     if call.kind == "method" and call.callee_name in _VISITOR_CALLS and "." in call.callee:
         class_name = call.callee.rsplit(".", 1)[0]
         for qualname in project.visitors.get((path, class_name), ()):
@@ -756,6 +782,47 @@ def _jump_import(project: Project, path: str, qualname: str) -> tuple[str, str] 
     edge = project.edge_for(index.path, binding.name, binding.line)
     if edge is None or edge.is_wildcard or edge.imported_name == "*":
         return None
+    return _target_from_edge(project, index, edge, method)
+
+
+def _alternate_import_targets(project: Project, path: str, qualname: str) -> list[tuple[str, str]]:
+    """Definitions a repeated import of one name can resolve to.
+
+    ``if cond: from a import thing`` / ``else: from b import thing`` is one
+    binding and two edges. A use of ``thing`` reaches both definitions.
+    """
+    method = ""
+    import_qual = qualname
+    if qualname.startswith(("@xref:", "@lambda:", "@attr:", "@super:", "@box:", "@chain:", "@call:", "@recv:")):
+        return []
+    if qualname.startswith("@import:"):
+        parsed, method = _split_import_qualname(qualname)
+        if not parsed:
+            return []
+        import_qual = parsed
+    elif qualname.startswith("@"):
+        return []
+    binding = project.bindings.get(path, {}).get(import_qual)
+    if binding is None or binding.kind != "import":
+        return []
+    index = project.by_path.get(path)
+    if index is None:
+        return []
+    found: list[tuple[str, str]] = []
+    for edge in project.edges_for_binding(path, binding):
+        if edge.is_wildcard or edge.imported_name == "*":
+            continue
+        if not edge.imported_name and not method:
+            continue
+        target = _target_from_edge(project, index, edge, method)
+        if target is not None and target not in found:
+            found.append(target)
+    if len(found) < 2:
+        return []
+    return found
+
+
+def _target_from_edge(project: Project, index: FileIndex, edge: ImportEdge, method: str) -> tuple[str, str] | None:
     module = project.resolve_import(edge.module, edge.level, index.path)
     if not edge.imported_name:
         if not method or not module:

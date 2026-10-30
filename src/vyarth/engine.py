@@ -199,7 +199,7 @@ def _broken_names(root: Path, errors: list[ParseError]) -> set[str] | None:
             continue
         try:
             text, _ = read_python_source(root / error.path)
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError, SyntaxError):
             return None
         words.update(word.lower() for word in _WORD.findall(text))
     return words

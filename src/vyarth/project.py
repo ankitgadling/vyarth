@@ -74,6 +74,29 @@ class Project:
             return edges[-1]
         return None
 
+    def edges_for_binding(self, path: str, binding: Binding) -> tuple[ImportEdge, ...]:
+        """Import edges that store this binding.
+
+        A later import in the same scope reuses the binding and keeps the first
+        line. An import of the same name in another function is a different binding.
+        """
+        edges = self.import_edges.get(path, {}).get(binding.name, ())
+        if len(edges) < 2:
+            return edges
+        lines = [
+            item.line
+            for item in self.bindings.get(path, {}).values()
+            if item.name == binding.name and item.kind == "import"
+        ]
+        if len(lines) < 2:
+            return edges
+        owned: list[ImportEdge] = []
+        for edge in edges:
+            owner = max((line for line in lines if line <= edge.line), default=None)
+            if owner == binding.line:
+                owned.append(edge)
+        return tuple(owned)
+
     def module_binding(self, path: str, name: str) -> Binding | None:
         return self.module_bindings.get(path, {}).get(name)
 
