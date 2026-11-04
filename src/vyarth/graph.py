@@ -236,8 +236,15 @@ def class_attribute_findings(
     unresolved: set[str],
     surface: PublicSurface,
     progress: ScanProgress | None = None,
+    convention_used: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[Finding]:
-    """Class attributes nobody loads. Dataclass and attrs fields stay quiet."""
+    """Class attributes nobody loads. Dataclass and attrs fields stay quiet.
+
+    `convention_used` keeps a class, such as Django `Meta`, whose attributes should
+    be reported even though nothing references the class. Owner counts stay on
+    `referenced`, so this set does not change the single-owner suppression for
+    every other class. A class in the set is itself exempt from that suppression.
+    """
     findings: list[Finding] = []
     total = len(project.indexes)
     owners = _attribute_owners(project, referenced, reachable)
@@ -255,13 +262,20 @@ def class_attribute_findings(
             if _declarative_class(project, index, class_name) or _enum_class(index, class_name):
                 continue
             class_binding = classes.get(class_name)
-            if class_binding is None or not _class_used(index, class_binding, referenced, reachable):
+            if class_binding is None:
+                continue
+            class_key = (index.path, class_binding.qualname)
+            if not _class_used(index, class_binding, referenced, reachable) and class_key not in convention_used:
                 continue
             if (index.path, binding.qualname) in reachable:
                 continue
             if _symbol_referenced(project, index, binding, referenced):
                 continue
-            if binding.name in unresolved and owners.get(binding.name, 0) == 1:
+            if (
+                binding.name in unresolved
+                and owners.get(binding.name, 0) == 1
+                and class_key not in convention_used
+            ):
                 # One class defines this name and an attribute with that name is loaded
                 # on a receiver of unknown type.
                 continue

@@ -285,6 +285,7 @@ def _analysis_payload(config: Config, fold: dict[str, str]) -> str:
         "ignore_decorators": list(config.ignore_decorators),
         "ignore_bases": list(config.ignore_bases),
         "report_dev_dependencies": config.report_dev_dependencies,
+        "report_framework_conventions": config.report_framework_conventions,
     }
     return json.dumps(payload, separators=(",", ":"))
 

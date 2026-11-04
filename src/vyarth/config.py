@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+import os
 import tomllib
 import warnings
 
@@ -76,6 +77,7 @@ _KNOWN_KEYS = frozenset(
         "ignore_decorators",
         "ignore_bases",
         "report_dev_dependencies",
+        "report_framework_conventions",
     }
 )
 
@@ -100,6 +102,7 @@ class Config:
     ignore_decorators: tuple[str, ...] = ()
     ignore_bases: tuple[str, ...] = ()
     report_dev_dependencies: bool = False
+    report_framework_conventions: bool = False
 
     def fold_map(self) -> dict[str, str]:
         return dict(self.fold)
@@ -112,20 +115,23 @@ class Config:
 def load_config(root: Path, config_path: Path | None = None) -> Config:
     """Load `[tool.vyarth]` from the scan root, or an explicit toml file."""
     if config_path is not None:
-        return _read_config_file(config_path)
+        config, auto = _read_config_file(config_path)
+        return _apply_framework_auto(root, config, auto)
     pyproject = root / "pyproject.toml"
     if pyproject.is_file():
         data = _load_toml(pyproject)
         tool = data.get("tool", {})
         if isinstance(tool, dict) and isinstance(tool.get("vyarth"), dict):
-            return _config_from_table(tool["vyarth"])
+            config, auto = _config_from_table(tool["vyarth"])
+            return _apply_framework_auto(root, config, auto)
     vyarth_toml = root / "vyarth.toml"
     if vyarth_toml.is_file():
-        return _read_config_file(vyarth_toml)
-    return Config()
+        config, auto = _read_config_file(vyarth_toml)
+        return _apply_framework_auto(root, config, auto)
+    return _apply_framework_auto(root, Config(), True)
 
 
-def _read_config_file(path: Path) -> Config:
+def _read_config_file(path: Path) -> tuple[Config, bool]:
     data = _load_toml(path)
     tool = data.get("tool", {})
     if isinstance(tool, dict) and isinstance(tool.get("vyarth"), dict):
@@ -141,7 +147,7 @@ def _load_toml(path: Path) -> dict:
     return loaded
 
 
-def _config_from_table(table: dict) -> Config:
+def _config_from_table(table: dict) -> tuple[Config, bool]:
     unknown = sorted(key for key in table if key not in _KNOWN_KEYS)
     if unknown:
         warnings.warn(f"unknown configuration keys: {', '.join(unknown)}", stacklevel=2)
@@ -176,10 +182,7 @@ def _config_from_table(table: dict) -> Config:
         raise ValueError("duplicate_min_statements must be an integer") from exc
     if duplicate_min_statements < 1:
         raise ValueError("duplicate_min_statements must be a positive integer")
-    frameworks = _as_strings(table.get("frameworks"))
-    unknown_frameworks = sorted(set(frameworks) - FRAMEWORKS)
-    if unknown_frameworks:
-        raise ValueError(f"unknown frameworks: {', '.join(unknown_frameworks)}")
+    frameworks, auto = _parse_frameworks(table)
     return Config(
         ignore=ignore,
         exclude=exclude,
@@ -196,16 +199,99 @@ def _config_from_table(table: dict) -> Config:
         ignore_names=_as_strings(table.get("ignore_names")),
         ignore_decorators=_as_strings(table.get("ignore_decorators")),
         ignore_bases=_as_strings(table.get("ignore_bases")),
-        report_dev_dependencies=_as_bool(table.get("report_dev_dependencies"), False),
-    )
+        report_dev_dependencies=_as_bool(table.get("report_dev_dependencies"), False, "report_dev_dependencies"),
+        report_framework_conventions=_as_bool(
+            table.get("report_framework_conventions"),
+            False,
+            "report_framework_conventions",
+        ),
+    ), auto
 
 
-def _as_bool(value: object, default: bool) -> bool:
+def _parse_frameworks(table: dict) -> tuple[tuple[str, ...], bool]:
+    """Return the preset names and whether Django may be detected.
+
+    A missing key and the string ``auto`` detect. ``[]`` leaves presets off.
+    A bare string stays one preset, except ``auto``.
+    """
+    if "frameworks" not in table or table["frameworks"] is None:
+        return (), True
+    value = table["frameworks"]
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return (), True
+    names = _as_strings(value)
+    unknown = sorted(set(names) - FRAMEWORKS)
+    if unknown:
+        raise ValueError(f"unknown frameworks: {', '.join(unknown)}")
+    return names, False
+
+
+def _apply_framework_auto(root: Path, config: Config, auto: bool) -> Config:
+    if not auto or "django" in config.frameworks:
+        return config
+    if _django_project(root, config):
+        return replace(config, frameworks=config.frameworks + ("django",))
+    return config
+
+
+def _django_project(root: Path, config: Config) -> bool:
+    """Required ``django`` dependency, or a boot file setting ``DJANGO_SETTINGS_MODULE``."""
+    if _boot_assigns_settings(root, config):
+        return True
+    from vyarth.dependencies import has_runtime_requirement
+
+    return has_runtime_requirement(root, "django", config)
+
+
+def _boot_assigns_settings(root: Path, config: Config) -> bool:
+    """``manage.py``, ``wsgi.py``, or ``asgi.py`` assigns ``DJANGO_SETTINGS_MODULE``.
+
+    Example, tutorial, and vendored trees do not count. The same file names are
+    what the settings-module cap reads.
+    """
+    from vyarth.confidence import BOOT_FILE_NAMES, DJANGO_SETTINGS_ASSIGNMENT
+    from vyarth.dependencies import _under_example_tree
+    from vyarth.discover import MANIFEST_SKIP_DIRS, exclusion_specs, path_excluded, relative_posix
+
+    root = root.resolve()
+    exclude_spec, gitignore = exclusion_specs(root, config)
+    for dirpath, dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        kept: list[str] = []
+        for name in dirnames:
+            if name in MANIFEST_SKIP_DIRS or name.endswith(".egg-info"):
+                continue
+            relative = relative_posix(directory / name, root)
+            if path_excluded(relative, exclude_spec, gitignore):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        if directory != root and _under_example_tree(directory, root):
+            continue
+        for name in filenames:
+            if name not in BOOT_FILE_NAMES:
+                continue
+            path = directory / name
+            if _under_example_tree(path, root):
+                continue
+            relative = relative_posix(path, root)
+            if path_excluded(relative, exclude_spec, gitignore):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if DJANGO_SETTINGS_ASSIGNMENT.search(text):
+                return True
+    return False
+
+
+def _as_bool(value: object, default: bool, key: str) -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
         return value
-    raise ValueError("report_dev_dependencies must be true or false")
+    raise ValueError(f"{key} must be true or false")
 
 
 def _as_fold(value: object) -> tuple[tuple[str, str], ...]:

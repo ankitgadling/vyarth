@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `frameworks` defaults to `auto`. A required `django` dependency, or `DJANGO_SETTINGS_MODULE` assigned in `manage.py`, `wsgi.py`, or `asgi.py`, turns on the Django entry files. `frameworks = []` opts out. An optional extra, a Poetry group, `dependency-groups`, or `requirements-dev.txt` does not. `settings.py`, `urls.py`, `apps.py`, `admin.py`, and migration modules do not mark the project as an application.
 - Fewer false positives, found by probing the analyzer with repro cases:
   - Quoted types in `TypeVar(bound=...)`, `List["X"]`, `NewType`, `TypedDict`, `NamedTuple`, `cast`, `isinstance`, and `Generic`, and `# type:` comments, count as uses. An import behind `if False:` that only holds typing names is treated as a typing import.
   - `locals()` and `vars()` read every local. Loop, unpacking, `with ... as`, and comprehension targets, and `_name` locals, are not reported as unused variables.

@@ -29,7 +29,7 @@ A module is an entry when any of these is true:
 - it is a test module, including `conftest.py`, `tests.py`, and anything under `tests/` or a top-level `test/`
 - `[project.scripts]`, `[project.gui-scripts]`, any `[project.entry-points]` group, `[tool.poetry.scripts]`, `[tool.poetry.plugins]`, `setup.cfg` `[options.entry_points]`, or `entry_points` in `setup.py` names it
 - `entry_points` in config names it
-- `frameworks` includes `django` and the path is `settings.py`, `admin.py`, `apps.py`, `urls.py`, or a file under `migrations/`
+- `frameworks` includes `django` and the path is `settings.py`, `admin.py`, `apps.py`, `urls.py`, or a file under `migrations/`. Omitted `frameworks`, and `frameworks = "auto"`, include `django` when a required dependency declares it, or `manage.py`, `wsgi.py`, or `asgi.py` sets `DJANGO_SETTINGS_MODULE`. An optional extra does not. Those files do not by themselves make the project an application.
 
 A symbol is an entry when:
 
@@ -37,7 +37,6 @@ A symbol is an entry when:
 - it is a module-level function named `lambda_handler`, or whose name starts with `pytest_`
 - its name starts with `test_`
 - it is a method named `ready`
-- `frameworks` includes `django` and it is a class named `Meta`, or a module-level name `urlpatterns`
 - `frameworks` includes `celery` and it is a module-level name `beat_schedule`
 - its class has a base listed in `ignore_bases`, which also covers that class’s methods and attributes, including a class nested in a function
 
@@ -83,8 +82,9 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Any file in the project imports dynamically | unused modules drop to 60 |
 | Referenced, but no entry reaches the reference | 80, or 60 if an unresolved attribute call uses the name |
 | Duplicate body | 80 |
+| `Migration` in a migrations module, an `UPPER_CASE` name in a settings module, an `AppConfig` subclass in `apps.py`, `urlpatterns` or `handler400`–`handler500` in `urls.py`, Sphinx `setup` in `docs/conf.py` or `doc/conf.py`, or an attribute of a nested `Meta` in a models, admin, forms, or serializers module | 60 |
 
-Findings in an unused module, other than unreachable code, are capped at the module’s score. A `DEAD` finding that this cap, or the Alembic adjustment, lowers below 100 becomes `POSSIBLY_DEAD`.
+The path caps in the last row apply on every scan, including when `frameworks` is empty. Findings in an unused module, other than unreachable code, are capped at the module’s score. A `DEAD` finding that this cap, the Alembic adjustment, or a framework-convention cap lowers below 100 becomes `POSSIBLY_DEAD`.
 
 ## Dependencies and duplicates
 

@@ -90,11 +90,11 @@ from vyarth import load_config
 config = load_config(Path("."))
 ```
 
-`load_config(root, config_path=None)` reads `[tool.vyarth]` from `root / "pyproject.toml"`, then `root / "vyarth.toml"`. An explicit `config_path` loads that file only. The fields match the [configuration keys](configuration.md): `ignore`, `exclude`, `entry_patterns`, `min_confidence`, `framework_decorators`, `frameworks`, `ignore_names`, `ignore_decorators`, `ignore_bases`, `entry_points`, `baseline`, `fail_on`, `fold`, `workers`, `duplicate_min_statements`, and `report_dev_dependencies`.
+`load_config(root, config_path=None)` reads `[tool.vyarth]` from `root / "pyproject.toml"`, then `root / "vyarth.toml"`. An explicit `config_path` loads that file only. The fields match the [configuration keys](configuration.md): `ignore`, `exclude`, `entry_patterns`, `min_confidence`, `framework_decorators`, `frameworks`, `ignore_names`, `ignore_decorators`, `ignore_bases`, `entry_points`, `baseline`, `fail_on`, `fold`, `workers`, `duplicate_min_statements`, `report_dev_dependencies`, and `report_framework_conventions`.
 
 `config.fold_map()` returns the fold table as a `dict`. `config.excludes` is the built-in excludes plus `config.exclude`.
 
-You can construct `Config` yourself and pass it to `scan`. That skips file discovery.
+You can construct `Config` yourself and pass it to `scan`. That skips file discovery and leaves `frameworks` empty. `load_config` is what applies `frameworks = "auto"`.
 
 ## Rendering
 

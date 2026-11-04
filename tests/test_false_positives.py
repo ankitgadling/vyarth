@@ -4,6 +4,7 @@ from textwrap import dedent
 
 from tests.conftest import write_tree
 from vyarth import scan
+from vyarth.config import Config, load_config
 
 MAIN = "\nif __name__ == '__main__':\n    main()\n"
 
@@ -708,3 +709,354 @@ def test_dunder_main_module_makes_an_application(tmp_path):
 def test_sphinx_settings_are_not_reported(tmp_path):
     files = {"docs/conf.py": "project = 'x'\nextensions = []\n", "lib.py": "X = 1\n"}
     assert not {"project", "extensions"} & symbols(tmp_path, files)
+
+
+def _named(findings, symbol, path):
+    return [item for item in findings if item.symbol == symbol and item.path == path]
+
+
+def test_migration_and_settings_caps_apply_without_django_mode(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/migrations/__init__.py": "class Migration:\n    pass\n",
+            "app/migrations/extra.py": "class Migration:\n    pass\n\nclass Helper:\n    pass\n",
+            "app/settings.py": "SITE_ID = 1\nname = 'x'\n",
+            "app/global_settings.py": "SECURE_HOST = 'x'\n",
+            "cfg/__init__.py": "",
+            "cfg/settings/__init__.py": "",
+            "cfg/settings/base.py": "DATABASES = {}\n",
+            "pkg/__init__.py": "",
+            "pkg/runtime.py": "SECRET_KEY = 'x'\nplain = 1\n",
+            "manage.py": "import os\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'pkg.runtime')\n",
+            "main.py": (
+                "import app.migrations\n"
+                "import app.migrations.extra\n"
+                "import app.settings\n"
+                "import app.global_settings\n"
+                "import cfg.settings.base\n"
+                "import pkg.runtime\n"
+                "\n"
+                "def main():\n"
+                "    return 1\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    findings = scan(tmp_path).findings
+    migration = _named(findings, "Migration", "app/migrations/extra.py")
+    package_migration = _named(findings, "Migration", "app/migrations/__init__.py")
+    helper = _named(findings, "Helper", "app/migrations/extra.py")
+    assert migration and all(item.confidence <= 60 for item in migration)
+    assert "Framework convention" in migration[0].evidence[-1]
+    assert package_migration and all("Framework convention" not in item.evidence[-1] for item in package_migration)
+    assert helper and all(item.confidence >= 90 for item in helper)
+    for symbol, path in (
+        ("SITE_ID", "app/settings.py"),
+        ("SECURE_HOST", "app/global_settings.py"),
+        ("DATABASES", "cfg/settings/base.py"),
+        ("SECRET_KEY", "pkg/runtime.py"),
+    ):
+        found = _named(findings, symbol, path)
+        assert found and all(item.confidence <= 60 for item in found)
+    assert _named(findings, "name", "app/settings.py")[0].confidence >= 90
+    assert _named(findings, "plain", "pkg/runtime.py")[0].confidence >= 90
+
+
+def test_appconfig_alias_url_hooks_and_sphinx_setup_are_capped(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/base.py": (
+                "from django.apps import AppConfig\n"
+                "\n"
+                "class BaseAppConfig(AppConfig):\n"
+                "    name = 'base'\n"
+            ),
+            "app/apps.py": (
+                "from app.base import BaseAppConfig\n"
+                "from django.apps import AppConfig as AC\n"
+                "\n"
+                "class AccountAppConfig(AC):\n"
+                "    name = 'app'\n"
+                "\n"
+                "class ProductAppConfig(django.apps.AppConfig):\n"
+                "    name = 'product'\n"
+                "\n"
+                "class Inherited(BaseAppConfig):\n"
+                "    name = 'inherited'\n"
+                "\n"
+                "class Dotted(app.base.BaseAppConfig):\n"
+                "    name = 'dotted'\n"
+                "\n"
+                "class Plain:\n"
+                "    pass\n"
+            ),
+            "app/urls.py": "urlpatterns = []\nhandler404 = 'app.views.missing'\nOTHER = 1\n",
+            "docs/__init__.py": "",
+            "docs/conf.py": "def setup(app):\n    return app\n\ndef theme():\n    return 1\n",
+            "main.py": (
+                "import app.apps\n"
+                "import app.urls\n"
+                "import docs.conf\n"
+                "\n"
+                "def main():\n"
+                "    return 1\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    findings = scan(tmp_path).findings
+    for symbol in (
+        "AccountAppConfig",
+        "ProductAppConfig",
+        "Inherited",
+        "Dotted",
+        "urlpatterns",
+        "handler404",
+        "setup",
+    ):
+        found = [item for item in findings if item.symbol == symbol]
+        assert found and all(item.confidence <= 60 for item in found), symbol
+    assert _named(findings, "Plain", "app/apps.py")[0].confidence >= 90
+    assert _named(findings, "OTHER", "app/urls.py")[0].confidence >= 90
+    assert _named(findings, "theme", "docs/conf.py")[0].confidence >= 90
+
+
+def test_meta_attributes_stay_hidden_until_requested(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "shop/__init__.py": "",
+            "shop/models.py": (
+                "class Other:\n"
+                "    model = 1\n"
+                "\n"
+                "class Order:\n"
+                "    class Meta:\n"
+                "        model = 'orders.Order'\n"
+                "        fields = ['id']\n"
+                "\n"
+                "def main():\n"
+                "    obj = unknown()\n"
+                "    Other()\n"
+                "    return obj.model\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    hidden = scan(tmp_path, config=Config(frameworks=("django",))).findings
+    assert not [item for item in hidden if "Meta." in item.fingerprint]
+    assert not [item for item in hidden if item.fingerprint.endswith("Other.model")]
+    shown = scan(tmp_path, config=Config(report_framework_conventions=True)).findings
+    meta_model = [item for item in shown if item.fingerprint.endswith("Order.Meta.model")]
+    meta_fields = [item for item in shown if item.fingerprint.endswith("Order.Meta.fields")]
+    assert meta_model and meta_model[0].confidence <= 60
+    assert "Framework convention" in meta_model[0].evidence[-1]
+    assert meta_fields and meta_fields[0].confidence <= 60
+    assert not [item for item in shown if item.fingerprint.endswith("Other.model")]
+
+
+_LIBRARY = {
+    "app/__init__.py": "",
+    "app/settings.py": "INSTALLED_APPS = []\nSECRET = 1\n",
+    "app/urls.py": "urlpatterns = []\n",
+    "app/api.py": "def helper():\n    return 1\n",
+}
+
+
+def _unused_modules(findings):
+    return {item.path for item in findings if item.rule == "POSSIBLY_UNUSED_MODULE"}
+
+
+def test_runtime_django_enables_the_preset_without_app_mode(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        _LIBRARY,
+        pyproject='[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["Django>=4.2"]\n',
+    )
+    assert load_config(tmp_path).frameworks == ("django",)
+    unused = _unused_modules(findings)
+    assert "app/settings.py" not in unused
+    assert "app/urls.py" not in unused
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 60
+
+
+def test_explicit_django_string_does_not_need_a_dependency(tmp_path):
+    findings = findings_for(tmp_path, _LIBRARY, pyproject='[tool.vyarth]\nframeworks = "django"\n')
+    assert "app/settings.py" not in _unused_modules(findings)
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 60
+
+
+def test_empty_frameworks_opts_out_of_django_entries(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        _LIBRARY,
+        pyproject=(
+            '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["Django>=4.2"]\n\n'
+            "[tool.vyarth]\nframeworks = []\n"
+        ),
+    )
+    assert load_config(tmp_path).frameworks == ()
+    assert "app/settings.py" in _unused_modules(findings)
+
+
+def test_installed_apps_alone_does_not_enable_django(tmp_path):
+    findings = findings_for(tmp_path, _LIBRARY)
+    assert load_config(tmp_path).frameworks == ()
+    assert "app/settings.py" in _unused_modules(findings)
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 60
+
+
+def test_dev_only_django_does_not_enable_the_preset(tmp_path):
+    trees = [
+        {
+            "pyproject.toml": (
+                '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["requests"]\n\n'
+                '[project.optional-dependencies]\ntest = ["Django>=4.2"]\n'
+            ),
+        },
+        {"requirements-dev.txt": "Django>=4.2\n"},
+        {"docs/requirements.txt": "Django>=4.2\n"},
+        {"pyproject.toml": '[tool.poetry.group.dev.dependencies]\ndjango = "*"\n'},
+        {"pyproject.toml": '[dependency-groups]\ndev = ["Django>=4.2"]\n'},
+        {
+            "pyproject.toml": (
+                '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["requests"]\n\n'
+                '[project.optional-dependencies]\ndjango = ["Django>=4.2"]\n'
+            ),
+        },
+        {
+            "pyproject.toml": (
+                '[tool.poetry.dependencies]\npython = "^3.11"\n'
+                'django = { version = ">=4.2", optional = true }\n'
+            ),
+        },
+    ]
+    for index, extra in enumerate(trees):
+        root = tmp_path / str(index)
+        write_tree(root, {**_LIBRARY, **extra})
+        assert load_config(root).frameworks == ()
+        assert "app/settings.py" in _unused_modules(scan(root).findings)
+
+
+def test_poetry_runtime_django_enables_the_preset(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        _LIBRARY,
+        pyproject='[tool.poetry.dependencies]\npython = "^3.11"\ndjango = "*"\n',
+    )
+    assert load_config(tmp_path).frameworks == ("django",)
+    assert "app/settings.py" not in _unused_modules(findings)
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 60
+
+
+def test_manage_py_settings_module_enables_django(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            **_LIBRARY,
+            "manage.py": (
+                "import os\n"
+                "import app.api\n"
+                "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')\n"
+            ),
+        },
+    )
+    assert load_config(tmp_path).frameworks == ("django",)
+    assert "app/settings.py" not in _unused_modules(findings)
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 96
+
+
+def test_setup_cfg_install_requires_enables_django(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {**_LIBRARY, "setup.cfg": "[options]\ninstall_requires =\n    Django>=4.2\n"},
+    )
+    assert load_config(tmp_path).frameworks == ("django",)
+    assert "app/settings.py" not in _unused_modules(findings)
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 60
+
+
+def test_package_wsgi_enables_django(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            **_LIBRARY,
+            "app/wsgi.py": "import os\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')\n",
+        },
+    )
+    assert load_config(tmp_path).frameworks == ("django",)
+    assert "app/settings.py" not in _unused_modules(findings)
+
+
+def test_example_manage_py_does_not_enable_django(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            **_LIBRARY,
+            "examples/manage.py": "import os\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')\n",
+        },
+    )
+    assert load_config(tmp_path).frameworks == ()
+    assert "app/settings.py" in _unused_modules(findings)
+
+
+def test_one_segment_settings_module_does_not_cap_another_file(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "manage.py": (
+                "import os\n"
+                "import config\n"
+                "import pkg.config\n"
+                "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config')\n"
+            ),
+            "config.py": "SECRET = 1\n",
+            "pkg/__init__.py": "",
+            "pkg/config.py": "TOKEN = 1\n",
+        },
+    )
+    findings = scan(tmp_path).findings
+    assert _named(findings, "SECRET", "config.py")[0].confidence <= 60
+    assert _named(findings, "TOKEN", "pkg/config.py")[0].confidence >= 90
+
+
+def test_used_meta_outside_a_model_module_keeps_its_score(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            "app.py": (
+                "class Widget:\n"
+                "    class Meta:\n"
+                "        label = 1\n"
+                "\n"
+                "def main():\n"
+                "    return Widget.Meta()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    found = [item for item in findings if item.fingerprint.endswith("Widget.Meta.label")]
+    assert found and found[0].confidence >= 90
+    assert "Framework convention" not in found[0].evidence[-1]
+
+
+def test_manage_py_without_settings_module_stays_off(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {**_LIBRARY, "manage.py": "import app.api\n\ndef main():\n    return 1\n"},
+    )
+    assert load_config(tmp_path).frameworks == ()
+    assert "app/settings.py" in _unused_modules(findings)
+    assert _named(findings, "helper", "app/api.py")[0].confidence == 96
