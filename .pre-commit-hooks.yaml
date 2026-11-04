@@ -1,0 +1,7 @@
+- id: vyarth
+  name: vyarth
+  description: Find unused Python in files changed against git. The hook still indexes the whole project.
+  entry: vyarth scan --changed --fail-on high --format concise
+  language: python
+  pass_filenames: false
+  types: [python]

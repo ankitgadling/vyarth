@@ -7,7 +7,9 @@ from pathlib import Path
 import re
 
 from vyarth.discover import import_target, indexes_by_module, package_roots, relative_posix
+from vyarth.graph import setting_string_symbols, swept_setting_paths
 from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding, ImportEdge
+from vyarth.project import build_project
 
 
 _NEUTRAL_DECORATORS = {
@@ -50,6 +52,8 @@ _CAPPED_RULES = {
 }
 _ALEMBIC_NAMES = {"upgrade", "downgrade", "revision", "down_revision", "branch_labels", "depends_on"}
 _FRAMEWORK_CONVENTION_NOTE = "Framework convention. This name is loaded by the framework without a local reference."
+_STRING_REFERENCE_NOTE = "Named by a dotted string. The final attribute was not found on that module."
+_SETTINGS_SWEEP_NOTE = "This module is read with getattr or dir(), so this name may be loaded by that loop."
 _URL_SYMBOLS = frozenset({"urlpatterns", "handler400", "handler403", "handler404", "handler500"})
 BOOT_FILE_NAMES = frozenset({"manage.py", "wsgi.py", "asgi.py"})
 DJANGO_SETTINGS_ASSIGNMENT = re.compile(
@@ -74,6 +78,9 @@ def apply_confidence(findings: list[Finding], indexes: list[FileIndex], root: Pa
     settings_paths = _django_settings_modules(indexes)
     roots = package_roots(root)
     by_module = indexes_by_module(indexes, roots)
+    project = build_project(indexes, root)
+    _used_strings, string_misses = setting_string_symbols(project)
+    swept = swept_setting_paths(project)
     capped: list[Finding] = []
     for finding in adjusted:
         finding = _alembic(finding)
@@ -92,6 +99,8 @@ def apply_confidence(findings: list[Finding], indexes: list[FileIndex], root: Pa
             by_module,
             roots,
         )
+        finding = _string_reference(finding, string_misses)
+        finding = _settings_sweep(finding, swept)
         capped.append(finding)
     return capped
 
@@ -167,6 +176,38 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
         status="POSSIBLY_DEAD",
         confidence=min(finding.confidence, 96),
         evidence=checklist,
+    )
+
+
+def _string_reference(finding: Finding, misses: set[tuple[str, str]]) -> Finding:
+    """A dotted string named this module, and its final attribute is not a binding."""
+    if finding.rule not in {"UNUSED_CLASS", "UNUSED_FUNCTION"}:
+        return finding
+    if (finding.path, finding.symbol) not in misses:
+        return finding
+    return _cap(finding, 60, _STRING_REFERENCE_NOTE)
+
+
+def _settings_sweep(finding: Finding, paths: set[str]) -> Finding:
+    """`getattr(module, name)` or `dir(module)` can read an upper-case settings name."""
+    if finding.path not in paths or "." in _qualname(finding):
+        return finding
+    if finding.rule not in {"UNUSED_VARIABLE", "UNUSED_CLASS", "UNUSED_FUNCTION"}:
+        return finding
+    if not _is_upper_name(finding.symbol):
+        return finding
+    return _cap(finding, 70, _SETTINGS_SWEEP_NOTE)
+
+
+def _cap(finding: Finding, score: int, note: str) -> Finding:
+    evidence = _with_note(finding.evidence, note)
+    if finding.confidence <= score and evidence == finding.evidence:
+        return finding
+    return replace(
+        finding,
+        confidence=min(finding.confidence, score),
+        status=_lowered_status(finding.status) if finding.confidence > score else finding.status,
+        evidence=evidence,
     )
 
 
@@ -275,7 +316,8 @@ def _is_settings_path(path: str, extra: frozenset[str]) -> bool:
     if any(_settings_module_path(path, item) for item in extra):
         return True
     name = path.rsplit("/", 1)[-1]
-    if name == "settings.py" or name.endswith("_settings.py"):
+    stem = name[:-3] if name.endswith(".py") else name
+    if name == "settings.py" or name.endswith("_settings.py") or "settings" in stem.lower():
         return True
     parent = path.rsplit("/", 1)[0] if "/" in path else ""
     return parent.rsplit("/", 1)[-1] == "settings" and name.endswith(".py")

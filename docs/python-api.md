@@ -24,6 +24,12 @@ def scan(
     use_cache: bool = True,
     overlays: dict[str, str] | None = None,
     progress: ScanProgress | None = None,
+    sort: str | None = None,
+    max_findings: int | None = None,
+    select: tuple[str, ...] = (),
+    ignore_rules: tuple[str, ...] = (),
+    fixable_only: bool = False,
+    baseline_mode: str = "new",
 ) -> ScanResult:
 ```
 
@@ -31,7 +37,7 @@ def scan(
 
 `config` is a `Config` instance. When it is omitted, `scan` loads configuration from `config_path`, or from the project root. `min_confidence`, when set, replaces `config.min_confidence` for this call.
 
-`baseline` is a fingerprint file. When it is omitted and `apply_baseline` is true, the path in `config.baseline` is used. Pass `apply_baseline=False` to ignore both. A missing or malformed baseline raises `FileNotFoundError` or `ValueError`.
+`baseline` is a fingerprint file. When it is omitted and `apply_baseline` is true, the path in `config.baseline` is used. Pass `apply_baseline=False` to ignore both. A missing or malformed baseline raises `FileNotFoundError` or `ValueError`. `baseline_mode="all"` keeps baselined findings and sets `Finding.baselined`. `"new"` hides them.
 
 `defines` merges into the fold map from config. Keys in `defines` win.
 
@@ -42,6 +48,8 @@ def scan(
 `overlays` maps an absolute file path to source text. The language server uses this for an unsaved buffer. Overlay text is not cached.
 
 `progress` is a `vyarth.progress.ScanProgress`. The CLI constructs one and writes the status line to standard error. Leave it as `None` in library code.
+
+`sort` is `confidence`, `path`, or `rule`. When it is omitted and `max_findings` is set, the order is `confidence`. Otherwise the order is `path`. `max_findings` keeps that many findings. `ScanResult.census` counts the set before the cut, and `to_report` copies those counts into `summary`. `select` and `ignore_rules` are canonical rule names such as `UNUSED_FUNCTION`. `fixable_only` keeps findings a safe fix can delete. An unknown sort or rule raises `ValueError`.
 
 ```python
 from vyarth import scan
@@ -59,7 +67,7 @@ if result.findings:
 | `errors` | `tuple[ParseError, ...]` | Files that failed to parse. The rest of the project was still scanned. |
 | `files_scanned` | `int` | Files that produced an index. |
 
-`to_dict()` returns `files_scanned`, `findings`, and `errors`. `to_json()` returns that object as indented JSON with a trailing newline.
+`to_dict()` and `to_json()` return report schema v1. `to_report(root=..., show_fixes=False, applied=None)` is the same object. It keeps `files_scanned`, `findings`, and `errors`, and adds `schema_version`, `summary`, and the per-finding fields `id`, `reasons`, `fix`, `qualname`, `kind`, and end positions. `to_json()` is indented JSON with a trailing newline.
 
 ## `Finding`
 
@@ -76,6 +84,10 @@ Frozen dataclass. Every field is a plain value, so `dataclasses.asdict` round-tr
 | `message` | One sentence suitable for a diagnostic. |
 | `evidence` | Short checks that produced the score. |
 | `fingerprint` | `rule:path:qualname`. Stable across line shifts. |
+| `id` | `VY` plus base32 of the fingerprint. Filled in when the scan result is built. An 8-character collision uses 12. |
+| `qualname`, `kind` | Qualname from the fingerprint, and `import`, `function`, `class`, `variable`, `statement`, `module`, or `package`. |
+| `reasons` | Machine codes for the evidence lines, from `vyarth.reasons.REASONS`. |
+| `end_line`, `end_column` | Filled in the report when a root is available. The dataclass leaves them at 0. |
 
 ## `ParseError`
 
@@ -90,7 +102,7 @@ from vyarth import load_config
 config = load_config(Path("."))
 ```
 
-`load_config(root, config_path=None)` reads `[tool.vyarth]` from `root / "pyproject.toml"`, then `root / "vyarth.toml"`. An explicit `config_path` loads that file only. The fields match the [configuration keys](configuration.md): `ignore`, `exclude`, `entry_patterns`, `min_confidence`, `framework_decorators`, `frameworks`, `ignore_names`, `ignore_decorators`, `ignore_bases`, `entry_points`, `baseline`, `fail_on`, `fold`, `workers`, `duplicate_min_statements`, `report_dev_dependencies`, and `report_framework_conventions`.
+`load_config(root, config_path=None)` reads `[tool.vyarth]` from `root / "pyproject.toml"`, then `root / "vyarth.toml"`. An explicit `config_path` loads that file only. The fields match the [configuration keys](configuration.md), including `require_ignore_reason`, `report_unused_ignores`, and `allow`.
 
 `config.fold_map()` returns the fold table as a `dict`. `config.excludes` is the built-in excludes plus `config.exclude`.
 
@@ -119,4 +131,4 @@ notes = apply_fixes(root, result.findings)
 updated, notes = rewrite_source(source, result.findings, "pkg/app.py")
 ```
 
-`apply_fixes` writes files and returns one note per edit. `rewrite_source` returns the new text and does not touch the disk. Both accept `unsafe=True` to include unused imports in `__init__.py` and dotted side-effect imports. `is_fixable` is true for an unused import whose status is `DEAD`, except one in `__init__.py`, and for unreachable code, nested functions, and function-local assignments at confidence 100. Details are in [Fix and editor](fix-and-editor.md).
+`apply_fixes` writes files and returns one note per edit. `apply_fixes_verified` writes them, runs `py_compile` and an optional command, and restores the original bytes when a check fails. `rewrite_source` returns the new text and does not touch the disk. Both accept `unsafe=True` to include unused imports in `__init__.py` and dotted side-effect imports. `unsafe_fixes=True` also deletes a nested 90–99 name. `is_fixable` is true for an unused import whose status is `DEAD`, except one in `__init__.py`, and for unreachable code, nested functions, and function-local assignments at confidence 100. Details are in [Fix and editor](fix-and-editor.md).

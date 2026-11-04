@@ -78,10 +78,41 @@ _KNOWN_KEYS = frozenset(
         "ignore_bases",
         "report_dev_dependencies",
         "report_framework_conventions",
+        "fix_verify_command",
+        "fix_verify_timeout",
+        "require_ignore_reason",
+        "report_unused_ignores",
+        "allow",
+    }
+)
+
+_ALLOW_RULES = frozenset(
+    {
+        "unused_import",
+        "unused_function",
+        "unused_class",
+        "unused_variable",
+        "unreachable_code",
+        "orphan_function",
+        "possibly_unused_module",
+        "wildcard_import",
+        "unused_dependency",
+        "duplicate_code",
+        "unused_ignore",
+        "ignore_without_reason",
     }
 )
 
 FAIL_ON_LEVELS = {"high": 90, "medium": 70, "low": 0}
+
+
+@dataclass(frozen=True)
+class AllowRule:
+    """One `[[tool.vyarth.allow]]` entry. `rule` is empty when every rule matches."""
+
+    symbol: str
+    rule: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -103,6 +134,11 @@ class Config:
     ignore_bases: tuple[str, ...] = ()
     report_dev_dependencies: bool = False
     report_framework_conventions: bool = False
+    fix_verify_command: str = ""
+    fix_verify_timeout: int = 60
+    require_ignore_reason: bool = False
+    report_unused_ignores: bool = False
+    allow: tuple[AllowRule, ...] = ()
 
     def fold_map(self) -> dict[str, str]:
         return dict(self.fold)
@@ -183,6 +219,16 @@ def _config_from_table(table: dict) -> tuple[Config, bool]:
     if duplicate_min_statements < 1:
         raise ValueError("duplicate_min_statements must be a positive integer")
     frameworks, auto = _parse_frameworks(table)
+    command = table.get("fix_verify_command") or ""
+    if not isinstance(command, str):
+        raise ValueError("fix_verify_command must be a string")
+    timeout = table.get("fix_verify_timeout", 60)
+    try:
+        fix_verify_timeout = int(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fix_verify_timeout must be an integer") from exc
+    if fix_verify_timeout < 1:
+        raise ValueError("fix_verify_timeout must be a positive integer")
     return Config(
         ignore=ignore,
         exclude=exclude,
@@ -205,6 +251,11 @@ def _config_from_table(table: dict) -> tuple[Config, bool]:
             False,
             "report_framework_conventions",
         ),
+        fix_verify_command=command,
+        fix_verify_timeout=fix_verify_timeout,
+        require_ignore_reason=_as_bool(table.get("require_ignore_reason"), False, "require_ignore_reason"),
+        report_unused_ignores=_as_bool(table.get("report_unused_ignores"), False, "report_unused_ignores"),
+        allow=_as_allow(table.get("allow")),
     ), auto
 
 
@@ -284,6 +335,31 @@ def _boot_assigns_settings(root: Path, config: Config) -> bool:
             if DJANGO_SETTINGS_ASSIGNMENT.search(text):
                 return True
     return False
+
+
+def _as_allow(value: object) -> tuple[AllowRule, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("allow must be a list of tables")
+    found: list[AllowRule] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("allow entries must be tables")
+        symbol = item.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError("allow entries need a symbol")
+        rule = item.get("rule") or ""
+        if not isinstance(rule, str):
+            raise ValueError("allow rule must be a string")
+        normalized = rule.strip().lower().replace("-", "_")
+        if normalized and normalized not in _ALLOW_RULES:
+            raise ValueError(f"unknown allow rule: {rule}")
+        reason = item.get("reason") or ""
+        if not isinstance(reason, str):
+            raise ValueError("allow reason must be a string")
+        found.append(AllowRule(symbol=symbol.strip(), rule=normalized, reason=reason))
+    return tuple(found)
 
 
 def _as_bool(value: object, default: bool, key: str) -> bool:

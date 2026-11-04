@@ -29,6 +29,9 @@ The name `_` and dunder names such as `__all__` are not reported. Parameters are
 
 A name listed in `__all__` is used. So is a name that another project module imports and then loads: a call, an annotation, or another `__all__` entry. An import that nothing in the importing file loads does not keep the original definition alive. Passing a function as a value (`handlers.append(foo)`) is a use.
 
+<a id="unused_function"></a>
+<a id="unused_class"></a>
+
 ## `UNUSED_FUNCTION` and `UNUSED_CLASS`
 
 A private module-level function or class with no references is `POSSIBLY_DEAD` at 96% when an entry module can import that file. A public name, one that does not start with `_`, also scores 96% when the project is an application (a console script, `__main__.py`, a framework callback, or a top-level script with a main guard; `docs/conf.py`, `setup.py`, examples, and package-internal main guards do not count), because callers inside the project would show up as references. It scores 60% when outside code may load it: the project has no entry point of its own (a library), or a package `__init__.py` or an `__all__` list exposes the name. The text report lists the checks under `Evidence:`:
@@ -41,7 +44,7 @@ A private module-level function or class with no references is `POSSIBLY_DEAD` a
 
 A nested function with no dynamic name and no decorator stays at 100%.
 
-An unreferenced private method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` A public method scores 96 too, or 60 when the project is a library or the class is exposed by an `__init__.py` or `__all__`, with evidence that callers outside this project may still load it. A method on a class that has a base outside the project scores 60 instead, with evidence that it may override a method of that external base. That includes a dotted base such as `threading.Thread` or `json.JSONEncoder`, a builtin such as `dict` or `Exception`, a name assigned in the module, and a subscript or call such as `Generic[T]` or `with_metaclass(...)`. `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
+An unreferenced private method on a used class is `UNUSED_FUNCTION` at 96, with the message `Method 'name' is never used.` A public method scores 96 too, or 60 when the project is a library or the class is exposed by an `__init__.py` or `__all__`, with evidence that callers outside this project may still load it. A method on a class that has a base outside the project, directly or through another project class, scores 60 instead, with evidence that it may override a method of that external base. `object` and `type` do not count. A direct `Generic` base counts only on that class. That includes a dotted base such as `threading.Thread` or `json.JSONEncoder`, a builtin such as `dict` or `Exception`, a name assigned in the module, and a subscript or call such as `Generic[T]` or `with_metaclass(...)`. `@property`, `@cached_property`, abstract methods, `pass`, `...`, and `raise NotImplementedError` stay silent. The body of a `@property` or `@cached_property` on a used class is still walked, so a call inside it counts. A reached call to a method also reaches an override of that method on a known subclass. On a used `NodeVisitor` or `NodeTransformer`, `visit_*` methods are reached too, because `visit` dispatches to them by node name. A method that is referenced, but no entry reaches the call, is `ORPHAN_FUNCTION` instead. A typed call such as `auth.async_auth_flow()` counts as a reference even when the caller itself is not reached.
 
 A decorator that is not a recognized entry lowers the score to 75%, including a nested function. `@property`, `@staticmethod`, and `@classmethod` are recorded and are not entries by themselves. See [How analysis works](how-analysis-works.md) for the decorator list.
 
@@ -49,11 +52,15 @@ A literal name passed to `getattr`, `setattr`, `eval`, or `exec` lowers that nam
 
 `upgrade`, `downgrade`, `revision`, `down_revision`, `branch_labels`, and `depends_on` under `alembic/versions/` score 70%. A finding that was `DEAD` becomes `POSSIBLY_DEAD`. The evidence says Alembic loads the name when the migration runs.
 
+<a id="unused_variable"></a>
+
 ## `UNUSED_VARIABLE`
 
 A function-local assignment that nothing reads is 100%. A loop target, an unpacking target, a `with ... as` name, a comprehension target, and a local whose name starts with `_` are never reported. `locals()` or `vars()` with no argument marks every local in the function as read. A private module-level name that nothing reads is 100%. A public module-level name scores 60, unless a dynamic call names it, which lowers it to 70%.
 
-An attribute that nothing loads, on a class that is used, is `UNUSED_VARIABLE` at 96. A public attribute scores 60 when the project is a library, the class is exposed through `__init__.py` or `__all__`, or the class has a base outside the project. An unresolved `obj.name()` anywhere lowers an attribute of that name to 60. `@dataclass` and attrs classes are left alone, so their fields are not reported. Members of `Enum`, `IntEnum`, `StrEnum`, `Flag`, and `IntFlag` are left alone too. Methods on those classes are still reported. Fields of a class that inherits, directly or through a project class, from `BaseModel`, `NamedTuple`, `TypedDict`, `Protocol`, a Django or SQLAlchemy model, and similar declarative bases are left alone. A class attribute on any other class with a base the scan cannot see scores 60 at most. A class attribute loaded as `type(self).name` or `self.__class__.name`, or incremented with `+=`, counts as read.
+An attribute that nothing loads, on a class that is used, is `UNUSED_VARIABLE` at 96. A public attribute scores 60 when the project is a library, the class is exposed through `__init__.py` or `__all__`, or the class has a base outside the project, directly or through another project class. An unresolved `obj.name()` anywhere lowers an attribute of that name to 60. `@dataclass` and attrs classes are left alone, so their fields are not reported. Members of `Enum`, `IntEnum`, `StrEnum`, `Flag`, and `IntFlag`, including a project class that extends one of those, are left alone too. A reached read of a class attribute also reaches an override of that attribute on a known subclass. Methods on those classes are still reported. Fields of a class that inherits, directly or through a project class, from `BaseModel`, `NamedTuple`, `TypedDict`, `Protocol`, a Django or SQLAlchemy model, and similar declarative bases are left alone. A class attribute on any other class with a base the scan cannot see scores 60 at most. A class attribute loaded as `type(self).name` or `self.__class__.name`, or incremented with `+=`, counts as read.
+
+<a id="unused_import"></a>
 
 ## `UNUSED_IMPORT`
 
@@ -66,15 +73,21 @@ The imported name is unused when nothing in that file loads it and it is not re-
 
 `# noqa` and `# noqa: F401` on the import statement, including a parenthesized import and a note after the code such as `# noqa: F401 kept for plugins`, suppress `UNUSED_IMPORT` for the names in that statement. A `# noqa` on the previous line does not.
 
+<a id="unreachable_code"></a>
+
 ## `UNREACHABLE_CODE`
 
 Reported after `return`, `raise`, `break`, or `continue`, and after `sys.exit()` or `os._exit()`. A branch whose test is the constant `False` is unreachable. `assert` is not an exit. A `with` or `async with` is not an exit either: `__exit__` may swallow the exception, as `contextlib.suppress` and `pytest.raises` do. Code after a `return` inside the `with` body is still unreachable. A `for` over an empty literal or an empty `range` makes the body unreachable. A loop `else` is unreachable when the body cannot finish normally, because it always `break`s, `return`s, or `raise`s. `vyarth fix` leaves a `yield` or `yield from` in place when it is the only yield in its function, because deleting it would turn a generator into a normal function. The finding stays.
 
 Folded environment checks use the same rule. With `ENVIRONMENT` folded to `production`, the body of `if os.getenv("ENVIRONMENT") == "development":` is unreachable, and calls inside it do not count.
 
+<a id="orphan_function"></a>
+
 ## `ORPHAN_FUNCTION`
 
 The function is referenced — something loads the name — and no entry point reaches that reference. Confidence is 80. An unresolved `obj.method()` lowers every orphan of that method name to 60, with the evidence `An unresolved attribute call uses this name.`
+
+<a id="possibly_unused_module"></a>
 
 ## `POSSIBLY_UNUSED_MODULE`
 
@@ -84,9 +97,13 @@ A project that contains a `src/` directory accepts both import styles. `src/acco
 
 Scanning a single file skips this rule.
 
+<a id="wildcard_import"></a>
+
 ## `WILDCARD_IMPORT`
 
 `from module import *` is reported so you can see where analysis is incomplete. It scores 60% because the import is not unused code. The imported names are still treated as possible references when the target module is in the project.
+
+<a id="unused_dependency"></a>
 
 ## `UNUSED_DEPENDENCY`
 
@@ -111,9 +128,18 @@ A package declared only in a development or docs manifest is not reported. That 
 
 Scanning a single file skips this rule. A scan of the project root skips manifests under `examples/`, `example/`, `tutorial/`, `tutorials/`, `samples/`, `sample/`, `demo/`, `demos/`, `benchmarks/`, or `benchmark/`. Nested package manifests, such as `packages/foo/pyproject.toml`, still count, and so does `docs/requirements.txt`. A subdirectory scan reports manifests inside that directory and manifests that sit in the project root. It does not report a manifest under another directory, such as `examples/requirements.txt` when the scan path is `src`, or a manifest excluded by config or `.gitignore`. Scanning the examples directory itself reports that directory's manifest. A dynamic `importlib.import_module("pkg")` with a string literal counts as an import of `pkg`.
 
+<a id="duplicate_code"></a>
+
 ## `DUPLICATE_CODE`
 
 Duplicate detection hashes statement shape and constants. Names bound in the function (parameters and assignments) are ignored. Free names, including called functions such as `min` and `max`, stay in the hash. Two bodies match only when they are structurally the same and at least `duplicate_min_statements` long (default 5). The first copy, in path and line order, is the origin. Later copies are reported at 80% with status `POSSIBLY_DUPLICATE` and a message such as `Function 'format_row' duplicates pkg/a.py:format_row`. That score stays out of `--fail-on high`. Test modules are not compared.
+
+<a id="unused_ignore"></a>
+<a id="ignore_without_reason"></a>
+
+## `UNUSED_IGNORE` and `IGNORE_WITHOUT_REASON`
+
+`UNUSED_IGNORE` is an ignore comment that matched no finding. It is reported only with `--report-unused-ignores` or `report_unused_ignores = true`. `IGNORE_WITHOUT_REASON` is reported when `require_ignore_reason = true` and a `# vyarth: ignore` comment has no reason. That comment does not suppress. `# noqa` is unchanged.
 
 ## Suppress a finding
 
@@ -124,8 +150,10 @@ On the same line, or on the line immediately above:
 def legacy_function():
     ...
 
-value = 1  # vyarth: ignore[unused-variable]
+value = 1  # vyarth: ignore[unused-variable] -- kept for the plugin loader
 ```
+
+A reason is the text after `--`, or `reason="..."`. `# vyarth: ignore[unused-function] -- called via Celery beat` stores that sentence. Older comments with no reason still suppress unless `require_ignore_reason` is set.
 
 A comment that is the only token on its line also suppresses the next line. A trailing `# vyarth: ignore` suppresses only the line it sits on. A comment with no bracket suppresses every rule on that statement. A bracket lists one or more rules, separated by commas. Rule names are case-insensitive. Hyphens and underscores match, so `unused-function` is `UNUSED_FUNCTION`.
 

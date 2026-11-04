@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "vyarth",
+    "version": "<version>"
+  },
+  "root": "<root>",
+  "files_scanned": 1,
+  "summary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false,
+    "by_rule": {
+      "UNUSED_IMPORT": 1
+    },
+    "by_band": {
+      "100": 1,
+      "90-99": 0,
+      "70-89": 0,
+      "0-69": 0
+    },
+    "fixable": {
+      "safe": 1,
+      "unsafe": 0
+    }
+  },
+  "findings": [
+    {
+      "id": "VYFXA7GLCT",
+      "fingerprint": "UNUSED_IMPORT:app.py:os",
+      "rule": "UNUSED_IMPORT",
+      "rule_url": "https://github.com/ankitgadling/vyarth/blob/main/docs/rules.md#unused_import",
+      "kind": "import",
+      "path": "app.py",
+      "line": 1,
+      "column": 8,
+      "end_line": 1,
+      "end_column": 10,
+      "symbol": "os",
+      "qualname": "os",
+      "status": "DEAD",
+      "confidence": 100,
+      "message": "Import 'os' is never used.",
+      "reasons": [
+        "no_references"
+      ],
+      "evidence": [
+        "No references found."
+      ],
+      "fix": {
+        "applicability": "safe"
+      },
+      "baselined": false
+    }
+  ],
+  "errors": []
+}

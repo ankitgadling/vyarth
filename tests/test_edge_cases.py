@@ -300,7 +300,7 @@ def test_nested_eval_and_decorator_are_not_deleted(tmp_path):
     text = (tmp_path / "app.py").read_text(encoding="utf-8")
     assert "def helper" in text
     assert "def hooked" in text
-    assert notes == [] or all("helper" not in note and "hooked" not in note for note in notes)
+    assert notes == [] or all(note.symbol not in {"helper", "hooked"} for note in notes)
 
 
 def test_all_append_and_extend_are_exports(tmp_path):

@@ -63,6 +63,8 @@ print(result.to_json())
 | Topic | Page |
 | --- | --- |
 | Commands, flags, and exit codes | [Command line](command-line.md) |
+| Using vyarth from an agent | [Agents](agents.md) |
+| MCP tools | [MCP](mcp.md) |
 | `pyproject.toml` and `vyarth.toml` | [Configuration](configuration.md) |
 | Each rule, its score, and what a load means | [Rules](rules.md) |
 | `scan`, `Finding`, and `ScanResult` | [Python API](python-api.md) |

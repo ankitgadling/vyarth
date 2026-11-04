@@ -1,0 +1,64 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "vyarth",
+          "version": "<version>",
+          "informationUri": "https://github.com/ankitgadling/vyarth",
+          "rules": [
+            {
+              "id": "UNUSED_IMPORT",
+              "shortDescription": {
+                "text": "UNUSED_IMPORT"
+              },
+              "fullDescription": {
+                "text": "An imported name is never used."
+              },
+              "helpUri": "https://github.com/ankitgadling/vyarth/blob/main/docs/rules.md#unused_import"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "UNUSED_IMPORT",
+          "level": "error",
+          "rank": 100,
+          "message": {
+            "text": "Import 'os' is never used."
+          },
+          "partialFingerprints": {
+            "vyarth/fingerprint": "UNUSED_IMPORT:app.py:os"
+          },
+          "properties": {
+            "confidence": 100,
+            "reasons": [
+              "no_references"
+            ],
+            "evidence": [
+              "No references found."
+            ]
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 8,
+                  "endLine": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

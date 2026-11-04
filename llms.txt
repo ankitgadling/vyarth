@@ -1,0 +1,19 @@
+# Vyarth
+
+> Scope-aware detector for unused Python code. It reports unused imports, functions, classes, variables, unreachable statements, and modules no entry can import.
+
+## Docs
+
+- [Command line](docs/command-line.md)
+- [Agents](docs/agents.md)
+- [MCP](docs/mcp.md)
+- [Rules](docs/rules.md)
+- [Configuration](docs/configuration.md)
+- [Fix and editor](docs/fix-and-editor.md)
+- [Python API](docs/python-api.md)
+- [Continuous integration](docs/continuous-integration.md)
+
+## Optional
+
+- [How analysis works](docs/how-analysis-works.md)
+- [Comparison](docs/comparison.md)

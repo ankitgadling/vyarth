@@ -28,7 +28,8 @@ from vyarth.incremental import (
     store_cached,
     store_result,
 )
-from vyarth.model import FileIndex, Finding, ParseError, ScanResult
+from vyarth.model import FileIndex, Finding, ParseError, ScanResult, assign_ids, attach_reasons
+from vyarth.present import present_findings
 from vyarth.progress import ScanProgress
 from vyarth.python_index import PythonAstBackend
 from vyarth.rules import collect_findings
@@ -57,6 +58,12 @@ def scan(
     use_cache: bool = True,
     overlays: dict[str, str] | None = None,
     progress: ScanProgress | None = None,
+    sort: str | None = None,
+    max_findings: int | None = None,
+    select: tuple[str, ...] = (),
+    ignore_rules: tuple[str, ...] = (),
+    fixable_only: bool = False,
+    baseline_mode: str = "new",
 ) -> ScanResult:
     """Scan a file or directory and return findings at or above the confidence threshold."""
     target = Path(path).expanduser().resolve()
@@ -110,6 +117,12 @@ def scan(
                 baseline,
                 apply_baseline,
                 report_only,
+                sort=sort,
+                max_findings=max_findings,
+                select=select,
+                ignore_rules=ignore_rules,
+                fixable_only=fixable_only,
+                baseline_mode=baseline_mode,
             )
 
     _status(progress, "indexing files", _index_detail(0, len(files), 0))
@@ -170,6 +183,12 @@ def scan(
         baseline,
         apply_baseline,
         report_only,
+        sort=sort,
+        max_findings=max_findings,
+        select=select,
+        ignore_rules=ignore_rules,
+        fixable_only=fixable_only,
+        baseline_mode=baseline_mode,
     )
 
 
@@ -260,14 +279,30 @@ def _finish(
     baseline: str | Path | None,
     apply_baseline: bool,
     report_only: set[str] | None,
+    *,
+    sort: str | None,
+    max_findings: int | None,
+    select: tuple[str, ...],
+    ignore_rules: tuple[str, ...],
+    fixable_only: bool,
+    baseline_mode: str,
 ) -> ScanResult:
     """Apply filters that do not change the analysis itself."""
-    findings = _apply_baseline(findings, root, config, baseline, apply_baseline)
+    findings = _apply_baseline(findings, root, config, baseline, apply_baseline, baseline_mode)
     findings = [finding for finding in findings if finding.confidence >= config.min_confidence]
     if report_only is not None:
         findings = [finding for finding in findings if finding.path in report_only]
-    findings.sort(key=lambda finding: (finding.path, finding.line, finding.column, finding.rule, finding.symbol))
-    return ScanResult(findings=tuple(findings), errors=tuple(errors), files_scanned=files_scanned)
+    prepared = tuple(attach_reasons(finding) for finding in assign_ids(findings))
+    shown, census = present_findings(
+        prepared,
+        root=root,
+        sort=sort,
+        max_findings=max_findings,
+        select=select,
+        ignore_rules=ignore_rules,
+        fixable_only=fixable_only,
+    )
+    return ScanResult(findings=shown, errors=tuple(errors), files_scanned=files_scanned, census=census)
 
 
 def _analysis_payload(config: Config, fold: dict[str, str]) -> str:
@@ -286,6 +321,11 @@ def _analysis_payload(config: Config, fold: dict[str, str]) -> str:
         "ignore_bases": list(config.ignore_bases),
         "report_dev_dependencies": config.report_dev_dependencies,
         "report_framework_conventions": config.report_framework_conventions,
+        "require_ignore_reason": config.require_ignore_reason,
+        "report_unused_ignores": config.report_unused_ignores,
+        "allow": [
+            {"symbol": item.symbol, "rule": item.rule, "reason": item.reason} for item in config.allow
+        ],
     }
     return json.dumps(payload, separators=(",", ":"))
 
@@ -414,6 +454,7 @@ def _apply_baseline(
     config: Config,
     baseline: str | Path | None,
     apply_baseline: bool,
+    mode: str,
 ) -> list[Finding]:
     if not apply_baseline:
         return findings
@@ -425,7 +466,12 @@ def _apply_baseline(
         path = root / path
     if not path.is_file():
         raise BaselineNotFoundError(path)
-    return filter_baselined(findings, load_baseline(path))
+    known = load_baseline(path)
+    if mode == "all":
+        return [replace(item, baselined=True) if item.fingerprint in known else item for item in findings]
+    if mode != "new":
+        raise ValueError(f"unknown baseline mode: {mode}")
+    return filter_baselined(findings, known)
 
 
 def _status(progress: ScanProgress | None, label: str, detail: str = "") -> None:

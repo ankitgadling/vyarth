@@ -1,5 +1,6 @@
 """Regression tests for code that looks unused to a static scan but is used."""
 
+from pathlib import Path
 from textwrap import dedent
 
 from tests.conftest import write_tree
@@ -565,6 +566,67 @@ def test_project_class_named_model_is_not_a_declarative_base(tmp_path):
     assert found["label"].confidence == 96
 
 
+def test_external_base_through_a_project_class_caps_the_subclass(tmp_path):
+    source = """
+    import threading
+
+    class Worker(threading.Thread):
+        pass
+
+    class Child(Worker):
+        label = 1
+
+        def work(self):
+            return 1
+
+    def main():
+        return Child()
+    """
+    found = {item.symbol: item for item in findings_for(tmp_path, {"app.py": source + MAIN})}
+    assert found["label"].confidence < 90
+    assert found["work"].confidence < 90
+
+
+def test_enum_through_a_project_class_keeps_its_members(tmp_path):
+    source = """
+    from enum import Enum
+
+    class BaseEnum(Enum):
+        pass
+
+    class Color(BaseEnum):
+        RED = "red"
+
+    def main():
+        return Color.RED
+    """
+    assert "RED" not in symbols(tmp_path, {"app.py": source + MAIN})
+
+
+def test_subclass_attribute_read_by_the_base_is_used(tmp_path):
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/base.py": (
+            "class Editor:\n"
+            "    sql = 'UPDATE'\n"
+            "\n"
+            "    def run(self):\n"
+            "        return self.sql\n"
+        ),
+        "pkg/pg.py": (
+            "from pkg.base import Editor\n"
+            "\n"
+            "class Pg(Editor):\n"
+            "    sql = 'UPDATE PG'\n"
+            "    extra = 1\n"
+        ),
+        "main.py": "from pkg.pg import Pg\n\ndef main():\n    print(Pg().run())\n" + MAIN,
+    }
+    found = symbols(tmp_path, files)
+    assert "sql" not in found
+    assert "extra" in found
+
+
 def test_framework_model_base_from_a_package_keeps_fields_quiet(tmp_path):
     source = """
     from django.db import models
@@ -764,6 +826,30 @@ def test_migration_and_settings_caps_apply_without_django_mode(tmp_path):
         assert found and all(item.confidence <= 60 for item in found)
     assert _named(findings, "name", "app/settings.py")[0].confidence >= 90
     assert _named(findings, "plain", "pkg/runtime.py")[0].confidence >= 90
+
+
+def test_upper_names_in_a_settings_template_are_capped(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            "zproject/__init__.py": "",
+            "zproject/prod_settings_template.py": "EMAIL_GATEWAY_PATTERN = 'x'\nplain = 1\n",
+            "main.py": (
+                "import zproject.prod_settings_template\n"
+                "\n"
+                "def main():\n"
+                "    return 1\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    findings = scan(tmp_path).findings
+    pattern = _named(findings, "EMAIL_GATEWAY_PATTERN", "zproject/prod_settings_template.py")
+    plain = _named(findings, "plain", "zproject/prod_settings_template.py")
+    assert pattern and pattern[0].confidence <= 60
+    assert plain and plain[0].confidence >= 90
 
 
 def test_appconfig_alias_url_hooks_and_sphinx_setup_are_capped(tmp_path):
@@ -1050,6 +1136,213 @@ def test_used_meta_outside_a_model_module_keeps_its_score(tmp_path):
     found = [item for item in findings if item.fingerprint.endswith("Widget.Meta.label")]
     assert found and found[0].confidence >= 90
     assert "Framework convention" not in found[0].evidence[-1]
+
+
+def test_dotted_settings_string_marks_the_class_used(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            "zerver/__init__.py": "",
+            "zerver/middleware.py": (
+                "class DetectProxyMisconfiguration:\n"
+                "    def process_request(self, request):\n"
+                "        return request\n"
+                "\n"
+                "class Other:\n"
+                "    pass\n"
+                "\n"
+                "def helper():\n"
+                "    return 1\n"
+            ),
+            "zproject/__init__.py": "",
+            "zproject/computed_settings.py": (
+                "MIDDLEWARE = [\n"
+                "    'zerver.middleware.DetectProxyMisconfiguration',\n"
+                "    'django.middleware.common.CommonMiddleware',\n"
+                "    'zerver.middleware.Ghost.missing',\n"
+                "]\n"
+            ),
+            "main.py": (
+                "import zerver.middleware\n"
+                "import zproject.computed_settings\n"
+                "\n"
+                "def main():\n"
+                "    return zproject.computed_settings.MIDDLEWARE\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    symbols_found = {item.symbol for item in findings}
+    assert "DetectProxyMisconfiguration" not in symbols_found
+    assert "process_request" not in symbols_found
+    assert "Other" in symbols_found
+    missing = [item for item in findings if item.symbol == "helper"]
+    assert missing and missing[0].confidence >= 90
+    ghost = [item for item in findings if item.symbol == "Ghost"]
+    assert not ghost
+
+
+def test_unresolved_dotted_string_caps_only_the_matching_name(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            "app/__init__.py": "",
+            "app/hooks.py": (
+                "class Ghost:\n"
+                "    pass\n"
+                "\n"
+                "def missing():\n"
+                "    return 1\n"
+                "\n"
+                "def helper():\n"
+                "    return 1\n"
+            ),
+            "app/settings.py": "EMAIL_BACKEND = 'app.hooks.Ghost.missing'\n",
+            "main.py": (
+                "import app.hooks\n"
+                "import app.settings\n"
+                "\n"
+                "def main():\n"
+                "    return app.settings.EMAIL_BACKEND\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    assert "Ghost" not in {item.symbol for item in findings}
+    missing = [item for item in findings if item.symbol == "missing"]
+    assert missing and all(item.confidence <= 60 for item in missing)
+    assert "dotted string" in missing[0].evidence[-1]
+    helper = [item for item in findings if item.symbol == "helper"]
+    assert helper and helper[0].confidence >= 90
+
+
+def test_rebound_from_import_marks_the_source_used(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/global_settings.py": "DSN = 'default'\nOTHER = 1\n",
+            "pkg/settings.py": (
+                "from pkg.global_settings import DSN\n"
+                "DSN = 'override'\n"
+                "\n"
+                "def value():\n"
+                "    return DSN\n"
+            ),
+            "main.py": (
+                "import pkg.settings\n"
+                "\n"
+                "def main():\n"
+                "    return pkg.settings.value()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    assert not _named(findings, "DSN", "pkg/global_settings.py")
+    assert "OTHER" in {item.symbol for item in findings}
+
+
+def test_override_through_an_empty_intermediate_class_is_reached(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            "auth.py": (
+                "class Base:\n"
+                "    def run(self):\n"
+                "        return 1\n"
+                "\n"
+                "class Mid(Base):\n"
+                "    pass\n"
+                "\n"
+                "class Child(Mid):\n"
+                "    def run(self):\n"
+                "        return 2\n"
+                "\n"
+                "class Side(Base):\n"
+                "    def other(self):\n"
+                "        return 3\n"
+            ),
+            "main.py": (
+                "from auth import Base, Side\n"
+                "\n"
+                "def main():\n"
+                "    Side()\n"
+                "    return Base().run()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    names = {item.symbol for item in findings}
+    assert "run" not in names
+    assert "other" in names
+
+
+def test_dir_and_getattr_lower_upper_names_in_the_target_module(tmp_path):
+    findings = findings_for(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/defaults.py": "SECURE_HOST = 'x'\nplain = 1\n",
+            "pkg/settings.py": (
+                "import pkg.defaults as defaults\n"
+                "\n"
+                "def load():\n"
+                "    for name in dir(defaults):\n"
+                "        if name.isupper():\n"
+                "            globals()[name] = getattr(defaults, name)\n"
+            ),
+            "main.py": (
+                "import pkg.settings\n"
+                "\n"
+                "def main():\n"
+                "    return pkg.settings.load()\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    main()\n"
+            ),
+        },
+    )
+    host = [item for item in findings if item.symbol == "SECURE_HOST"]
+    assert host and all(item.confidence <= 70 for item in host)
+    assert "getattr or dir()" in host[0].evidence[-1]
+    plain = [item for item in findings if item.symbol == "plain"]
+    assert plain and plain[0].confidence >= 90
+
+
+def test_mini_django_app_fixture(tmp_path):
+    source = Path(__file__).parent / "fixtures" / "django_app"
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        dest = tmp_path / path.relative_to(source)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(path.read_bytes())
+    findings = scan(tmp_path).findings
+    names = {item.symbol for item in findings}
+
+    def score(symbol, path):
+        found = _named(findings, symbol, path)
+        assert found, symbol
+        return found[0].confidence
+
+    assert "ProxyGuard" not in names
+    assert "process_request" not in names
+    assert "DSN" not in names
+    assert score("Migration", "app/migrations/0001_initial.py") <= 60
+    assert score("AccountConfig", "app/apps.py") <= 60
+    assert score("urlpatterns", "app/urls.py") <= 60
+    assert score("SECRET_KEY", "app/settings.py") <= 60
+    assert score("SECURE_HOST", "app/defaults.py") <= 70
+    assert score("plain", "app/defaults.py") >= 90
+    assert score("forgotten", "app/middleware.py") >= 90
 
 
 def test_manage_py_without_settings_module_stays_off(tmp_path):

@@ -469,6 +469,10 @@ def _index_from_dict(data: dict) -> FileIndex:
         import_probes=tuple(data.get("import_probes", ())),
         lambda_mentions=tuple(data.get("lambda_mentions", ())),
         module_strings=tuple(data.get("module_strings", ())),
+        setting_strings=tuple(
+            (str(item[0]), str(item[1])) for item in data.get("setting_strings", ()) if len(item) == 2
+        ),
+        module_sweeps=tuple(data.get("module_sweeps", ())),
     )
 
 
@@ -478,6 +482,9 @@ def _ignore(item: dict) -> IgnoreDirective:
         line=item["line"],
         rules=None if rules is None else tuple(rules),
         exact=bool(item.get("exact", False)),
+        reason=item.get("reason") or None,
+        origin=int(item.get("origin") or 0),
+        reportable=bool(item.get("reportable", False)),
     )
 
 

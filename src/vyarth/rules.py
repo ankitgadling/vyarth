@@ -18,7 +18,9 @@ from vyarth.graph import (
     public_surface,
     reachable_modules,
     reachable_symbols,
+    rebound_import_sources,
     reexported_symbol,
+    setting_string_symbols,
     subclass_registry_symbols,
     wildcard_references,
 )
@@ -66,6 +68,10 @@ def collect_findings(
     referenced |= import_hops(project)
     referenced |= subclass_registry_symbols(project)
     referenced |= set(entries.symbols)
+    referenced |= rebound_import_sources(project)
+    string_symbols, _string_misses = setting_string_symbols(project)
+    referenced |= string_symbols
+    reached |= string_symbols
     surface = public_surface(project, entries)
     for index in project.indexes:
         relpath = relative_posix(Path(index.path), project.root)

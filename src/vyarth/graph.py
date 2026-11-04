@@ -259,7 +259,7 @@ def class_attribute_findings(
             if _silent_name(binding.name):
                 continue
             class_name = binding.qualname.rsplit(".", 1)[0]
-            if _declarative_class(project, index, class_name) or _enum_class(index, class_name):
+            if _declarative_class(project, index, class_name) or _enum_class(project, index, class_name):
                 continue
             class_binding = classes.get(class_name)
             if class_binding is None:
@@ -353,6 +353,103 @@ def subclass_registry_symbols(project: Project) -> set[tuple[str, str]]:
             if ancestors & hooks:
                 found.add((index.path, class_name))
     return found
+
+
+def rebound_import_sources(project: Project) -> set[tuple[str, str]]:
+    """A from-import whose local name is assigned again still loaded the source.
+
+    `from pkg import DSN` followed by `DSN = ...` replaces the import binding, so
+    a later read of `DSN` is the new value. The source was evaluated at import time.
+    """
+    found: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        bindings = project.bindings.get(index.path, {})
+        for edge in index.imports:
+            if edge.is_wildcard or not edge.imported_name or edge.imported_name == "*":
+                continue
+            local = edge.alias or edge.imported_name
+            binding = bindings.get(local)
+            if binding is None or binding.kind == "import" or binding.line <= edge.line:
+                continue
+            target = _target_from_edge(project, index, edge, "")
+            if target is not None:
+                found.add(target)
+    return found
+
+
+def setting_string_symbols(project: Project) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Symbols named by a settings dotted string, and names the string does not bind.
+
+    The second set is `(relative path, symbol)`. A miss is not a finding. Callers
+    only lower a class or function that already has that name.
+    """
+    used: set[tuple[str, str]] = set()
+    missed: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        for _owner, text in index.setting_strings:
+            parts = text.split(".")
+            module_index: FileIndex | None = None
+            rest: list[str] = []
+            for cut in range(len(parts), 0, -1):
+                found_index = project.by_module.get(".".join(parts[:cut]))
+                if found_index is not None:
+                    module_index = found_index
+                    rest = parts[cut:]
+                    break
+            if module_index is None or not rest:
+                continue
+            binding = project.module_binding(module_index.path, rest[0])
+            relpath = relative_posix(Path(module_index.path), project.root)
+            if binding is None or binding.kind not in {"class", "function"}:
+                missed.add((relpath, rest[0]))
+                continue
+            used.add((module_index.path, binding.qualname))
+            if binding.kind == "class":
+                prefix = binding.qualname + "."
+                for qualname, item in project.bindings.get(module_index.path, {}).items():
+                    if not qualname.startswith(prefix) or "." in qualname[len(prefix) :]:
+                        continue
+                    if item.kind in {"function", "variable", "class"}:
+                        used.add((module_index.path, qualname))
+            if len(rest) < 2:
+                continue
+            member = f"{binding.qualname}.{rest[1]}"
+            if member in project.bindings.get(module_index.path, {}):
+                used.add((module_index.path, member))
+            else:
+                missed.add((relpath, rest[1]))
+    return used, missed
+
+
+def swept_setting_paths(project: Project) -> set[str]:
+    """Modules passed to `dir()` or to `getattr` with a non-literal name."""
+    found: set[str] = set()
+    for index in project.indexes:
+        for name in index.module_sweeps:
+            path = _swept_module(project, index, name)
+            if path is not None:
+                found.add(relative_posix(Path(path), project.root))
+    return found
+
+
+def _swept_module(project: Project, index: FileIndex, name: str) -> str | None:
+    binding = project.bindings.get(index.path, {}).get(name)
+    if binding is None or binding.kind != "import":
+        return None
+    edge = project.edge_for(index.path, binding.name, binding.line)
+    if edge is None or edge.is_wildcard:
+        return None
+    module = project.resolve_import(edge.module, edge.level, index.path)
+    if edge.imported_name:
+        child = f"{module}.{edge.imported_name}" if module else edge.imported_name
+        target = project.by_module.get(child)
+        if target is not None:
+            return target.path
+        return None
+    if not module:
+        return None
+    target = project.by_module.get(module)
+    return None if target is None else target.path
 
 
 def import_hops(project: Project) -> set[tuple[str, str]]:
@@ -465,13 +562,23 @@ def reachable_symbols(project: Project, entries: EntrySet) -> tuple[set[tuple[st
     def _mark_overrides(resolved: tuple[str, str]) -> None:
         path, qualname = resolved
         binding = project.bindings.get(path, {}).get(qualname)
-        if binding is None or binding.kind != "function" or "." not in qualname:
+        if binding is None or binding.kind not in {"function", "variable"} or "." not in qualname:
             return
         class_name, method = qualname.rsplit(".", 1)
+        _walk_overrides(path, class_name, method, set())
+
+    def _walk_overrides(path: str, class_name: str, method: str, seen: set[tuple[str, str]]) -> None:
+        """A subclass that does not define the method still passes it to its children."""
         for sub_path, sub_class in subclasses.get((path, class_name), ()):
+            key = (sub_path, sub_class)
+            if key in seen:
+                continue
+            seen.add(key)
             override = f"{sub_class}.{method}"
             if override in project.bindings.get(sub_path, {}):
                 add(sub_path, override)
+            else:
+                _walk_overrides(sub_path, sub_class, method, seen)
 
     def touch(path: str, qualname: str) -> None:
         """Mark a stored function used without walking its body."""
@@ -972,12 +1079,27 @@ def _visitor_class(project: Project, path: str, class_name: str) -> bool:
     return any(f"{class_name}.{method}" in bindings for method in _VISITOR_CALLS)
 
 
-def _enum_class(index: FileIndex, qualname: str) -> bool:
+def _enum_class(
+    project: Project,
+    index: FileIndex,
+    qualname: str,
+    _seen: frozenset[tuple[str, str]] = frozenset(),
+) -> bool:
+    """An enum, including one reached through a project class such as `class BaseEnum(Enum)`."""
+    key = (index.path, qualname)
+    if key in _seen:
+        return False
     for class_name, bases in index.class_bases:
         if class_name != qualname:
             continue
         for base in bases:
             if _base_leaf(base) in _ENUM_BASES:
+                return True
+            resolved = _project_base(project, index, base)
+            if resolved is None:
+                continue
+            owner = project.by_path.get(resolved[0])
+            if owner is not None and _enum_class(project, owner, resolved[1], _seen | {key}):
                 return True
     return False
 
@@ -1087,11 +1209,45 @@ def _project_base(project: Project, index: FileIndex, spec: str) -> tuple[str, s
     return None
 
 
-def _has_external_base(project: Project, index: FileIndex, class_name: str) -> bool:
+_TRIVIAL_EXTERNAL_BASES = {"object", "type"}
+# A direct `Generic[T]` base still counts. It does not spread to subclasses: those
+# classes are not a framework reflecting on every method.
+_TYPING_ONLY_BASES = {"Generic"}
+
+
+def _has_external_base(
+    project: Project,
+    index: FileIndex,
+    class_name: str,
+    _seen: frozenset[tuple[str, str]] = frozenset(),
+    *,
+    inherited: bool = False,
+) -> bool:
+    """A base outside the project, including one reached through another project class.
+
+    `object` and `type` do not count. `Generic` counts on the class that writes it
+    and does not spread to subclasses. A class written as `class Child(Parent)` where
+    `Parent` has no real base stays at the ordinary score.
+    """
+    key = (index.path, class_name)
+    if key in _seen:
+        return False
     bases = dict(index.class_bases).get(class_name)
     if not bases:
         return False
-    return any(_project_base(project, index, base) is None for base in bases)
+    for base in bases:
+        resolved = _project_base(project, index, base)
+        if resolved is None:
+            leaf = _base_leaf(base)
+            if leaf in _TRIVIAL_EXTERNAL_BASES or (inherited and leaf in _TYPING_ONLY_BASES):
+                continue
+            return True
+        owner = project.by_path.get(resolved[0])
+        if owner is not None and _has_external_base(
+            project, owner, resolved[1], _seen | {key}, inherited=True
+        ):
+            return True
+    return False
 
 
 def _symbol_referenced(
