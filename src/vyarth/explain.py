@@ -9,7 +9,7 @@ import re
 from vyarth.config import Config
 from vyarth.discover import discover_scan, read_python_source, relative_posix
 from vyarth.fix import applicability, render_fix_diff
-from vyarth.model import Finding
+from vyarth.model import Finding, IdError
 
 
 _SAMPLE_LIMIT = 5
@@ -19,7 +19,7 @@ def locate(findings: tuple[Finding, ...] | list[Finding], selector: str) -> Find
     """One finding named by an id, a fingerprint, or `path:line`."""
     exact = [item for item in findings if item.id == selector or item.fingerprint == selector]
     if len(exact) > 1:
-        raise ValueError(f"ambiguous id: {selector}")
+        raise IdError(f"ambiguous id: {selector}")
     if len(exact) == 1:
         return exact[0]
     path_line = _path_line(selector)
@@ -27,15 +27,15 @@ def locate(findings: tuple[Finding, ...] | list[Finding], selector: str) -> Find
         path, line = path_line
         matches = [item for item in findings if item.path == path and item.line == line]
         if len(matches) > 1:
-            raise ValueError(f"ambiguous id: {selector}")
+            raise IdError(f"ambiguous id: {selector}")
         if len(matches) == 1:
             return matches[0]
     prefix = [item for item in findings if selector and item.id.startswith(selector)]
     if len(prefix) > 1:
-        raise ValueError(f"ambiguous id: {selector}")
+        raise IdError(f"ambiguous id: {selector}")
     if len(prefix) == 1:
         return prefix[0]
-    raise ValueError(f"unknown id: {selector}")
+    raise IdError(f"unknown id: {selector}")
 
 
 def explain_payload(root: Path, config: Config, finding: Finding) -> dict[str, object]:

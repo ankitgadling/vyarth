@@ -9,12 +9,14 @@ import difflib
 from io import StringIO
 import json
 from pathlib import Path
+import re
 import subprocess
 import tokenize
 from typing import Any
 
 from vyarth.confidence import PROBE_NOTE, REEXPORT_NOTE, SIDE_EFFECT_NOTE
 from vyarth.discover import read_python_source
+from vyarth.incremental import ensure_cache_markers
 from vyarth.model import Finding, qualname_of
 from vyarth.verify import run_verification
 
@@ -299,9 +301,13 @@ def _write(
     unsafe: bool,
     write: bool,
     unsafe_fixes: bool = False,
+    check_dirty: bool = True,
 ) -> list[AppliedFix]:
     verb = "fixed" if write else "would fix"
-    kept, skipped = split_dirty(root, findings, unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+    if check_dirty:
+        kept, skipped = split_dirty(root, findings, unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+    else:
+        kept, skipped = list(findings), []
     notes: list[str] = []
     for relpath, source, updated, edits, encoding in _previews(
         root,
@@ -341,6 +347,10 @@ def _applied(findings: list[Finding], note: str, verb: str) -> AppliedFix:
     path, line, symbol = parsed
     finding = next((item for item in findings if item.path == path and item.line == line and item.symbol == symbol), None)
     if finding is None:
+        # A note can name several symbols at one line, so match on the line alone.
+        same_line = [item for item in findings if item.path == path and item.line == line]
+        finding = same_line[0] if len(same_line) == 1 else None
+    if finding is None:
         return AppliedFix("", "", path, line, symbol, "safe")
     level = applicability(finding) if finding is not None else "safe"
     if level == "none":
@@ -348,17 +358,17 @@ def _applied(findings: list[Finding], note: str, verb: str) -> AppliedFix:
     return AppliedFix(finding.id, finding.fingerprint, path, line, symbol, level)
 
 
+_NOTE = re.compile(r"^(?P<path>.+?):(?P<line>\d+) (?P<symbol>.+)$")
+
+
 def _parse_note(note: str, verb: str) -> tuple[str, int, str] | None:
     prefix = f"{verb} "
     if not note.startswith(prefix):
         return None
-    path_line, separator, symbol = note[len(prefix) :].rpartition(" ")
-    if not separator:
+    match = _NOTE.match(note[len(prefix) :])
+    if match is None:
         return None
-    path, separator, line = path_line.rpartition(":")
-    if not separator or not line.isdigit():
-        return None
-    return path, int(line), symbol
+    return match.group("path"), int(match.group("line")), match.group("symbol")
 
 
 def _previews(
@@ -994,7 +1004,7 @@ def _verify_all(
     writable = [finding for finding in findings if finding.path not in blocked_paths]
     if not snapshots:
         return _report((), held, verified=True, rolled_back=False, failed_step="", output_tail="")
-    applied = _write(root, writable, unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=True)
+    applied = _write(root, writable, unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=True, check_dirty=False)
     checked = run_verification(root, list(snapshots), verify_cmd, timeout)
     if checked.ok:
         return _report(_written(applied), held, verified=True, rolled_back=False, failed_step="", output_tail="")
@@ -1026,7 +1036,7 @@ def _verify_each(
         held.extend(blocked)
         if not snapshots:
             continue
-        wrote = _write(root, items, unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=True)
+        wrote = _write(root, items, unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=True, check_dirty=False)
         checked = run_verification(root, list(snapshots), verify_cmd, timeout)
         if checked.ok:
             applied.extend(_written(wrote))
@@ -1077,6 +1087,7 @@ def _snapshot(
 def _save_backup(root: Path, stamp: str, relpath: str, data: bytes) -> bool:
     dest = root / ".vyarth" / "backup" / stamp / relpath
     try:
+        ensure_cache_markers(root)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
     except OSError:
@@ -1124,19 +1135,36 @@ def _worktree_dirty_lines(root: Path) -> dict[str, set[int]] | None:
     inside = _git(root, ["git", "rev-parse", "--is-inside-work-tree"])
     if inside is None or inside.strip() != "true":
         return None
-    diff = _git(root, ["git", "diff", "-U0", "HEAD"])
+    diff = _git(root, ["git", "-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD"])
     if diff is None:
         return {}
     prefix = (_git(root, ["git", "rev-parse", "--show-prefix"]) or "").strip()
     return _parse_dirty(diff, prefix)
 
 
+def _diff_path(header: str) -> str:
+    """The new path from a `+++` header, or "" for `/dev/null` and unknown forms."""
+    header = header.rstrip("	")
+    if header == "/dev/null":
+        return ""
+    if header.startswith('"') and header.endswith('"') and len(header) >= 2:
+        try:
+            header = json.loads(header)
+        except ValueError:
+            header = header[1:-1]
+    if header.startswith("b/"):
+        return header[2:]
+    return ""
+
+
 def _parse_dirty(diff: str, prefix: str) -> dict[str, set[int]]:
     found: dict[str, set[int]] = {}
     current = ""
     for line in diff.splitlines():
-        if line.startswith("+++ b/"):
-            current = line[6:]
+        if line.startswith("+++ "):
+            current = _diff_path(line[4:])
+            if not current:
+                continue
             if prefix and current.startswith(prefix):
                 current = current[len(prefix) :]
             found.setdefault(current, set())

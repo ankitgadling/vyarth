@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -66,6 +68,7 @@ def _run(
             errors="replace",
             shell=shell,
             creationflags=flags,
+            start_new_session=sys.platform != "win32",
         )
     except OSError as exc:
         return VerifyResult(False, step, _tail(str(exc)))
@@ -73,7 +76,10 @@ def _run(
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill(process)
-        stdout, stderr = process.communicate()
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = None, None
         output = _text(stdout) + _text(stderr)
         return VerifyResult(False, "timeout", _tail(output or "timed out"))
     output = _text(stdout) + _text(stderr)
@@ -90,7 +96,10 @@ def _kill(process: subprocess.Popen[str]) -> None:
             check=False,
         )
         return
-    process.kill()
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
 
 
 def _text(value: str | bytes | None) -> str:

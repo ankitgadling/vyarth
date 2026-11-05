@@ -30,21 +30,26 @@ def cached_scan(root: Path, overlays: tuple[tuple[str, str], ...] = (), **kwargs
 
 
 def file_stamp(root: Path, *, refresh: bool = False) -> tuple[tuple[str, int, int], ...]:
-    """Size and mtime of every indexed file. A missing file refreshes the list once."""
-    if refresh:
-        _file_lists.pop(root, None)
-    files = _file_lists.get(root)
-    if files is None:
-        files = discover_files(root, load_config(root))
-        _file_lists[root] = files
+    """Size and mtime of every indexed file, the config files, and the baseline.
+
+    The file list is discovered on every call so new files, config edits and
+    baseline changes invalidate the cache. `refresh` is kept for callers that
+    want to force discovery; discovery now always runs.
+    """
+    config = load_config(root)
+    files = discover_files(root, config)
+    _file_lists[root] = files
+    extra = [root / "pyproject.toml", root / "vyarth.toml"]
+    if config.baseline:
+        extra.append(root / config.baseline)
+    else:
+        extra.append(root / "vyarth-baseline.json")
     stamps: list[tuple[str, int, int]] = []
-    for file in files:
+    for file in [*files, *extra]:
         try:
             stat = file.stat()
         except OSError:
-            if refresh:
-                continue
-            return file_stamp(root, refresh=True)
+            continue
         stamps.append((relative_posix(file, root), stat.st_size, stat.st_mtime_ns))
     return tuple(stamps)
 

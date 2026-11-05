@@ -176,3 +176,34 @@ def _rpc(process: subprocess.Popen[str], message: dict) -> dict:
     line = process.stdout.readline()
     assert line, process.stderr.read() if process.stderr is not None else "no stdout"
     return json.loads(line)
+
+
+def test_bad_argument_is_not_reported_as_an_unknown_id(tmp_path):
+    from vyarth.mcp import _call
+
+    write_tree(tmp_path, {"app.py": "import os\n"})
+    reply = _call(1, {"name": "scan", "arguments": {"min_confidence": "abc"}}, tmp_path, False)
+    assert reply["result"]["isError"] is True
+    assert "unknown_id" not in json.dumps(reply)
+
+
+def test_path_filter_applies_before_the_findings_limit(tmp_path):
+    from vyarth.mcp import _tool_scan
+
+    files = {f"top/m{i}.py": "import os\n" for i in range(4)}
+    files["sub/deep.py"] = "import sys\n"
+    write_tree(tmp_path, files)
+    report = _tool_scan(tmp_path.resolve(), {"path": "sub", "max_findings": 1, "min_confidence": 0, "rules": ["UNUSED_IMPORT"]})
+    assert [row["path"] for row in report["findings"]] == ["sub/deep.py"]
+    assert report["summary"]["total"] == 1
+    assert report["summary"]["truncated"] is False
+
+
+def test_a_new_file_invalidates_the_scan_cache(tmp_path):
+    from vyarth.session import cached_scan
+
+    write_tree(tmp_path, {"app.py": "import os\n"})
+    first = cached_scan(tmp_path.resolve(), min_confidence=0)
+    (tmp_path / "extra.py").write_text("import sys\n", encoding="utf-8")
+    second = cached_scan(tmp_path.resolve(), min_confidence=0)
+    assert {item.path for item in second.findings} > {item.path for item in first.findings}

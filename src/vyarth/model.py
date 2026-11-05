@@ -48,6 +48,10 @@ def assign_ids(findings: list[Finding] | tuple[Finding, ...]) -> tuple[Finding, 
     return tuple(assigned)
 
 
+class IdError(ValueError):
+    """An id selector that names no finding, or more than one."""
+
+
 def resolve_ids(findings: tuple[Finding, ...] | list[Finding], tokens: list[str]) -> tuple[Finding, ...]:
     """Findings named by an id or a fingerprint. An id that matches two findings is an error."""
     chosen: list[Finding] = []
@@ -56,9 +60,9 @@ def resolve_ids(findings: tuple[Finding, ...] | list[Finding], tokens: list[str]
         exact = [item for item in findings if item.id == token or item.fingerprint == token]
         matches = exact or [item for item in findings if token and item.id.startswith(token)]
         if len(matches) > 1:
-            raise ValueError(f"ambiguous id: {token}")
+            raise IdError(f"ambiguous id: {token}")
         if not matches:
-            raise ValueError(f"unknown id: {token}")
+            raise IdError(f"unknown id: {token}")
         if matches[0].fingerprint not in seen:
             seen.add(matches[0].fingerprint)
             chosen.append(matches[0])
@@ -362,8 +366,8 @@ class ScanResult:
         from vyarth import __version__
         from vyarth.fix import applicability, fix_edits
 
-        spans = _spans(root, self.findings) if root is not None else {}
         sources = _sources(root, self.findings) if root is not None else {}
+        spans = _spans(root, self.findings, sources) if root is not None else {}
         rows = []
         safe = 0
         unsafe = 0
@@ -463,20 +467,32 @@ def _sources(root: Path, findings: tuple[Finding, ...]) -> dict[str, str]:
     return found
 
 
-def _spans(root: Path, findings: tuple[Finding, ...]) -> dict[str, tuple[int, int]]:
-    sources = _sources(root, findings)
-    return {
-        finding.fingerprint: _statement_end(sources.get(finding.path, ""), finding.line, finding.symbol)
-        for finding in findings
-    }
+def _spans(
+    root: Path,
+    findings: tuple[Finding, ...],
+    sources: dict[str, str] | None = None,
+) -> dict[str, tuple[int, int]]:
+    sources = sources if sources is not None else _sources(root, findings)
+    trees: dict[str, ast.AST | None] = {}
+    spans: dict[str, tuple[int, int]] = {}
+    for finding in findings:
+        if finding.path not in trees:
+            trees[finding.path] = _parse(sources.get(finding.path, ""))
+        spans[finding.fingerprint] = _statement_end(trees[finding.path], finding.line, finding.symbol)
+    return spans
 
 
-def _statement_end(source: str, line: int, symbol: str) -> tuple[int, int]:
+def _parse(source: str) -> ast.AST | None:
     if not source:
-        return line, 1
+        return None
     try:
-        tree = ast.parse(source)
+        return ast.parse(source)
     except SyntaxError:
+        return None
+
+
+def _statement_end(tree: ast.AST | None, line: int, symbol: str) -> tuple[int, int]:
+    if tree is None:
         return line, 1
     found: ast.AST | None = None
     for node in ast.walk(tree):

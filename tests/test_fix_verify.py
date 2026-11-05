@@ -215,3 +215,49 @@ def test_verify_each_keeps_the_file_that_passes(tmp_path, monkeypatch):
     assert b"import os" not in (tmp_path / "good.py").read_bytes()
     assert b"import sys" in (tmp_path / "bad.py").read_bytes()
     assert any(item.path == "good.py" for item in report.applied)
+
+
+def test_parse_dirty_ignores_deleted_files_and_reads_quoted_paths():
+    from vyarth.fix import _parse_dirty
+
+    diff = (
+        "diff --git a/old.py b/old.py\n"
+        "+++ b/keep.py\n"
+        "@@ -1,0 +2,1 @@\n"
+        "+x\n"
+        "+++ /dev/null\n"
+        "@@ -1,5 +0,0 @@\n"
+        '+++ "b/sp ace.py"\n'
+        "@@ -3 +3 @@\n"
+    )
+    found = _parse_dirty(diff, "")
+    assert found["keep.py"] == {2}
+    assert found["sp ace.py"] == {3}
+    assert 1 not in found["keep.py"]
+
+
+def test_parse_note_keeps_a_symbol_with_spaces():
+    from vyarth.fix import _parse_note
+
+    assert _parse_note("fixed pkg/f.py:12 a b", "fixed") == ("pkg/f.py", 12, "a b")
+
+
+def test_a_verified_fix_leaves_the_worktree_clean_for_git(tmp_path):
+    write_tree(tmp_path, {"app.py": "import os\n\ndef main():\n    return 1\n\nif __name__ == '__main__':\n    main()\n"})
+    _commit(tmp_path)
+    report = apply_fixes_verified(tmp_path, [f for f in scan(tmp_path).findings if f.rule == "UNUSED_IMPORT"])
+    assert report.verified
+    _git(tmp_path, "checkout", "--", "app.py")
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_path, capture_output=True, text=True)
+    assert ".vyarth" not in status.stdout
+
+
+def test_timeout_kills_the_command_and_returns(tmp_path):
+    import time
+
+    from vyarth.verify import run_command
+
+    started = time.monotonic()
+    result = run_command(tmp_path, f'"{sys.executable}" -c "import time; time.sleep(30)"', 1)
+    assert not result.ok
+    assert time.monotonic() - started < 15

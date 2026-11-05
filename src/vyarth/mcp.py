@@ -13,7 +13,7 @@ from vyarth.config import load_config
 from vyarth.discover import read_python_source, relative_posix
 from vyarth.explain import explain_payload, locate
 from vyarth.fix import applicability, apply_fixes, apply_fixes_verified, render_fix_diff, split_dirty
-from vyarth.model import Finding, ScanResult, resolve_ids
+from vyarth.model import Finding, IdError, ScanResult, resolve_ids
 from vyarth.present import RULES, canonical_rules
 from vyarth.session import cached_scan
 
@@ -127,9 +127,10 @@ def _call(request_id: object, params: dict[str, Any], root: Path, read_only: boo
         return _fail(request_id, exc.code, str(exc), exc.body)
     except _ToolError as exc:
         return _fail(request_id, exc.code, str(exc))
-    except ValueError as exc:
-        code = "unknown_id" if "id" in str(exc) else "not_found"
-        return _fail(request_id, code, str(exc))
+    except IdError as exc:
+        return _fail(request_id, "unknown_id", str(exc))
+    except (ValueError, TypeError) as exc:
+        return _fail(request_id, "invalid_argument", str(exc))
     except FileNotFoundError as exc:
         return _fail(request_id, "not_found", str(exc))
     return _ok(request_id, payload)
@@ -158,28 +159,36 @@ def _tool_scan(root: Path, arguments: dict[str, Any]) -> dict[str, Any]:
         raise _ToolError("not_found", "rules must be a list")
     selected = canonical_rules([str(item) for item in rules]) if rules else ()
     changed_from = arguments.get("changed_from")
+    paths = arguments.get("paths") or []
+    limit = int(arguments.get("max_findings", 50))
+    narrowing = target != root or bool(paths)
     result = cached_scan(
         root,
         min_confidence=int(arguments.get("min_confidence", 90)),
-        max_findings=int(arguments.get("max_findings", 50)),
+        max_findings=None if narrowing else limit,
         sort=str(arguments.get("sort") or "confidence"),
         select=selected,
         fixable_only=bool(arguments.get("fixable_only", False)),
         changed=bool(changed_from),
         changed_from=str(changed_from or "HEAD"),
     )
-    if target != root:
-        narrowed = scan_within(result, root, target)
-    else:
-        narrowed = result
-    report = narrowed.to_report(root=root, brief_evidence=True)
-    paths = arguments.get("paths") or []
+    if narrowing:
+        result = _narrow(result, root, target, paths, limit)
+    return result.to_report(root=root, brief_evidence=True)
+
+
+def _narrow(result: ScanResult, root: Path, target: Path, paths: object, limit: int) -> ScanResult:
+    """Filter by path first, then cut to `limit`, so the census matches the filtered set."""
+    from dataclasses import replace
+
+    from vyarth.present import census_of
+
+    narrowed = scan_within(result, root, target) if target != root else result
+    findings = narrowed.findings
     if paths:
-        report["findings"] = [row for row in report["findings"] if _path_selected(root, paths, row["path"])]
-        report["summary"]["shown"] = len(report["findings"])
-        report["summary"]["total"] = len(report["findings"])
-        report["summary"]["truncated"] = False
-    return report
+        findings = tuple(item for item in findings if _path_selected(root, paths, item.path))
+    census = census_of(findings, root)
+    return replace(narrowed, findings=findings[:limit], census=census)
 
 
 def scan_within(result: ScanResult, root: Path, target: Path) -> ScanResult:
@@ -240,6 +249,7 @@ def _tool_apply(root: Path, arguments: dict[str, Any]) -> dict[str, Any]:
     rolled_back = False
     verified = False
     tail = ""
+    failed_step = ""
     applied_ids: list[str] = []
     if applicable and verify:
         report = apply_fixes_verified(
@@ -255,6 +265,7 @@ def _tool_apply(root: Path, arguments: dict[str, Any]) -> dict[str, Any]:
         rolled_back = report.rolled_back
         verified = report.verified
         tail = report.output_tail
+        failed_step = report.failed_step
     elif applicable:
         applied = apply_fixes(root, applicable, unsafe=False, unsafe_fixes=unsafe_fixes, write=True)
         applied_ids = [item.id for item in applied if item.line > 0]
@@ -266,6 +277,9 @@ def _tool_apply(root: Path, arguments: dict[str, Any]) -> dict[str, Any]:
         "verify_output_tail": tail,
         "remaining": {"summary": _summary(root)},
     }
+    if failed_step == "restore":
+        body["restore_failed"] = True
+        raise _ApplyFailed("restore_failed", tail or "could not restore the original files", body)
     if rolled_back and not applied_ids:
         raise _ApplyFailed("verify_failed", tail or "verification failed", body)
     if not applied_ids and skipped and all(item["reason"] == "dirty_lines" for item in skipped):
