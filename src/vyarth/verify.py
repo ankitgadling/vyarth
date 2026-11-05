@@ -54,7 +54,7 @@ def _run(
     shell: bool,
 ) -> VerifyResult:
     command: Any = args
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if sys.platform == "win32" else 0
     try:
         process = subprocess.Popen(
             command,
