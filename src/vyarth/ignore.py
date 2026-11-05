@@ -10,7 +10,7 @@ import tokenize
 
 import pathspec
 
-from vyarth.config import Config
+from vyarth.config import AllowRule, Config
 from vyarth.model import FileIndex, Finding, IgnoreDirective
 
 
@@ -23,6 +23,11 @@ _NOQA_RE = re.compile(
     rf"noqa\b(?:\s*:\s*({_NOQA_CODE}(?:\s*,\s*{_NOQA_CODE})*))?",
     re.IGNORECASE,
 )
+_REASON_EQ = re.compile(
+    r"""reason\s*=\s*(?:"([^"]*)"|'([^']*)')""",
+    re.IGNORECASE,
+)
+_REASON_DASH = re.compile(r"--\s*(.*?)\s*$")
 
 
 def normalize_rule(rule: str) -> str:
@@ -50,7 +55,17 @@ def collect_ignores(source: str) -> tuple[IgnoreDirective, ...]:
                     if part.strip()
                 )
             standalone = token.line.strip().startswith("#")
-            directives.append(IgnoreDirective(line=token.start[0], rules=rules, exact=not standalone))
+            line = token.start[0]
+            directives.append(
+                IgnoreDirective(
+                    line=line,
+                    rules=rules,
+                    exact=not standalone,
+                    reason=_parse_reason(token.string[match.end() :]),
+                    origin=line,
+                    reportable=True,
+                )
+            )
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return ()
     return tuple(directives)
@@ -83,7 +98,7 @@ def expand_import_ignores(tree: ast.AST, directives: tuple[IgnoreDirective, ...]
             if not item.exact or not start <= item.line <= end or item.line in alias_lines:
                 continue
             for line in positions:
-                extra.append(IgnoreDirective(line=line, rules=item.rules, exact=True))
+                extra.append(_copy(item, line, exact=True))
     if not extra:
         return directives
     return directives + tuple(extra)
@@ -155,13 +170,7 @@ def expand_decorator_ignores(tree: ast.AST, directives: tuple[IgnoreDirective, .
             if directive.exact and directive.line < first:
                 continue
             if on_decorator or directly_above:
-                extra.append(
-                    IgnoreDirective(
-                        line=statement_line,
-                        rules=directive.rules,
-                        exact=directive.exact,
-                    )
-                )
+                extra.append(_copy(directive, statement_line, exact=directive.exact))
     if not extra:
         return directives
     return directives + tuple(extra)
@@ -174,15 +183,25 @@ def apply_ignores(
 ) -> list[Finding]:
     path_spec = pathspec.GitIgnoreSpec.from_lines(config.ignore)
     kept: list[Finding] = []
+    hits: set[tuple[str, int]] = set()
     for finding in findings:
         if path_spec.match_file(finding.path):
             continue
         if _name_ignored(finding, config.ignore_names):
             continue
+        if _allow_ignored(finding, config.allow):
+            continue
         index = indexes.get(finding.path)
-        if index is not None and _comment_suppresses(index, finding):
+        directive = _matching_directive(index, finding) if index is not None else None
+        if directive is not None:
+            origin = _origin(directive)
+            if _reason_required(config, directive):
+                kept.append(finding)
+                continue
+            hits.add((finding.path, origin))
             continue
         kept.append(finding)
+    kept.extend(_ignore_findings(indexes, hits, config))
     return kept
 
 
@@ -192,7 +211,7 @@ def _name_ignored(finding: Finding, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(finding.symbol, pattern) for pattern in patterns)
 
 
-def _comment_suppresses(index: FileIndex, finding: Finding) -> bool:
+def _matching_directive(index: FileIndex, finding: Finding) -> IgnoreDirective | None:
     rule = normalize_rule(finding.rule)
     for directive in index.ignores:
         if directive.exact:
@@ -201,5 +220,103 @@ def _comment_suppresses(index: FileIndex, finding: Finding) -> bool:
         elif directive.line != finding.line and directive.line != finding.line - 1:
             continue
         if directive.rules is None or rule in directive.rules:
+            return directive
+    return None
+
+
+def _allow_ignored(finding: Finding, rules: tuple[AllowRule, ...]) -> bool:
+    if not rules:
+        return False
+    names = {finding.symbol}
+    if finding.qualname:
+        names.add(finding.qualname)
+    prefix = f"{finding.rule}:{finding.path}:"
+    if finding.fingerprint.startswith(prefix):
+        names.add(finding.fingerprint[len(prefix) :])
+    rule = normalize_rule(finding.rule)
+    for item in rules:
+        if item.rule and normalize_rule(item.rule) != rule:
+            continue
+        if any(fnmatch.fnmatchcase(name, item.symbol) for name in names if name):
             return True
     return False
+
+
+def _reason_required(config: Config, directive: IgnoreDirective) -> bool:
+    if not config.require_ignore_reason or not directive.reportable:
+        return False
+    return not (directive.reason and directive.reason.strip())
+
+
+def _origin(directive: IgnoreDirective) -> int:
+    return directive.origin or directive.line
+
+
+def _copy(directive: IgnoreDirective, line: int, *, exact: bool) -> IgnoreDirective:
+    return IgnoreDirective(
+        line=line,
+        rules=directive.rules,
+        exact=exact,
+        reason=directive.reason,
+        origin=_origin(directive),
+        reportable=directive.reportable,
+    )
+
+
+def _parse_reason(tail: str) -> str | None:
+    quoted = _REASON_EQ.search(tail)
+    if quoted is not None:
+        text = quoted.group(1) if quoted.group(1) is not None else quoted.group(2)
+        cleaned = (text or "").strip()
+        return cleaned or None
+    dashed = _REASON_DASH.search(tail)
+    if dashed is None:
+        return None
+    cleaned = dashed.group(1).strip()
+    return cleaned or None
+
+
+def _ignore_findings(
+    indexes: dict[str, FileIndex],
+    hits: set[tuple[str, int]],
+    config: Config,
+) -> list[Finding]:
+    found: list[Finding] = []
+    seen: set[tuple[str, int]] = set()
+    for path, index in indexes.items():
+        for directive in index.ignores:
+            origin = _origin(directive)
+            if not directive.reportable or directive.line != origin:
+                continue
+            key = (path, origin)
+            if key in seen:
+                continue
+            seen.add(key)
+            if _reason_required(config, directive):
+                found.append(_directive_finding("IGNORE_WITHOUT_REASON", path, directive))
+                continue
+            if config.report_unused_ignores and key not in hits:
+                found.append(_directive_finding("UNUSED_IGNORE", path, directive))
+    return found
+
+
+def _directive_finding(rule: str, path: str, directive: IgnoreDirective) -> Finding:
+    symbol = "*" if not directive.rules else ",".join(directive.rules)
+    if rule == "IGNORE_WITHOUT_REASON":
+        message = "Ignore directive has no reason."
+        evidence = ("This ignore directive has no reason.",)
+    else:
+        message = "Ignore directive suppressed nothing."
+        evidence = ("This ignore directive suppressed nothing.",)
+    return Finding(
+        rule=rule,
+        path=path,
+        line=directive.line,
+        column=1,
+        symbol=symbol,
+        status="DEAD",
+        confidence=100,
+        message=message,
+        evidence=evidence,
+        fingerprint=f"{rule}:{path}:{directive.line}",
+    )

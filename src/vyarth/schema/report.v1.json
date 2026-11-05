@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ankitgadling/vyarth/schema/report.v1.json",
+  "type": "object",
+  "required": ["schema_version", "files_scanned", "findings", "errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"}
+      }
+    },
+    "root": {"type": "string"},
+    "files_scanned": {"type": "integer", "minimum": 0},
+    "summary": {"$ref": "#/$defs/summary"},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "line", "message"],
+        "properties": {
+          "path": {"type": "string"},
+          "line": {"type": "integer"},
+          "column": {"type": "integer"},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "applied": {"type": "array"}
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["id", "fingerprint", "rule", "path", "line", "column", "symbol", "status", "confidence", "message", "evidence"],
+      "properties": {
+        "id": {"type": "string"},
+        "fingerprint": {"type": "string"},
+        "rule": {
+          "enum": [
+            "UNUSED_IMPORT",
+            "UNUSED_FUNCTION",
+            "UNUSED_CLASS",
+            "UNUSED_VARIABLE",
+            "UNREACHABLE_CODE",
+            "POSSIBLY_UNUSED_MODULE",
+            "WILDCARD_IMPORT",
+            "ORPHAN_FUNCTION",
+            "UNUSED_DEPENDENCY",
+            "DUPLICATE_CODE",
+            "UNUSED_IGNORE",
+            "IGNORE_WITHOUT_REASON"
+          ]
+        },
+        "rule_url": {"type": "string"},
+        "kind": {"type": "string"},
+        "path": {"type": "string"},
+        "line": {"type": "integer"},
+        "column": {"type": "integer"},
+        "end_line": {"type": "integer"},
+        "end_column": {"type": "integer"},
+        "symbol": {"type": "string"},
+        "qualname": {"type": "string"},
+        "status": {
+          "enum": ["DEAD", "POSSIBLY_DEAD", "POSSIBLY_UNUSED_MODULE", "ANALYSIS_LIMIT", "POSSIBLY_DUPLICATE"]
+        },
+        "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+        "message": {"type": "string"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "fix": {
+          "type": "object",
+          "properties": {
+            "applicability": {"enum": ["safe", "unsafe", "none"]},
+            "edits": {"type": "array"}
+          }
+        },
+        "baselined": {"type": "boolean"},
+        "env_sensitive": {"type": "boolean"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "shown", "truncated"],
+      "properties": {
+        "total": {"type": "integer"},
+        "shown": {"type": "integer"},
+        "truncated": {"type": "boolean"},
+        "by_rule": {"type": "object"},
+        "by_band": {"type": "object"},
+        "fixable": {"type": "object"}
+      }
+    }
+  }
+}

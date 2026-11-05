@@ -8,17 +8,13 @@ from pathlib import Path
 import sys
 from urllib.parse import unquote, urlparse
 
-from vyarth.config import load_config
-from vyarth.discover import discover_files, project_root, read_python_source, relative_posix
-from vyarth.engine import scan
+from vyarth.discover import project_root, read_python_source, relative_posix
 from vyarth.fix import is_fixable, rewrite_source
 from vyarth.model import Finding, ScanResult
 from vyarth.report import utf16_column
-
+from vyarth.session import cached_scan, drop_root
 
 _buffers: dict[Path, str] = {}
-_scan_cache: dict[tuple[object, ...], ScanResult] = {}
-_file_lists: dict[Path, list[Path]] = {}
 
 
 def serve(stdin=None, stdout=None) -> None:
@@ -156,15 +152,8 @@ def _scanned(uri: str) -> tuple[Path, str, str, ScanResult] | None:
         return None
     resolved = path.resolve()
     text = _buffers.get(resolved)
-    stamp = _file_stamp(root)
     overlays = _overlays(root)
-    key = (root, overlays, stamp)
-    result = _scan_cache.get(key)
-    if result is None:
-        result = scan(root, overlays=dict(overlays) or None)
-        _scan_cache[key] = result
-        if len(_scan_cache) > 8:
-            _scan_cache.pop(next(iter(_scan_cache)))
+    result = cached_scan(root, overlays)
     try:
         relpath = relative_posix(path, root)
     except ValueError:
@@ -230,25 +219,6 @@ def _span_edit(source: str, updated: str) -> dict:
     }
 
 
-def _file_stamp(root: Path, *, refresh: bool = False) -> tuple[tuple[str, int, int], ...]:
-    if refresh:
-        _file_lists.pop(root, None)
-    files = _file_lists.get(root)
-    if files is None:
-        files = discover_files(root, load_config(root))
-        _file_lists[root] = files
-    stamps: list[tuple[str, int, int]] = []
-    for file in files:
-        try:
-            stat = file.stat()
-        except OSError:
-            if refresh:
-                continue
-            return _file_stamp(root, refresh=True)
-        stamps.append((relative_posix(file, root), stat.st_size, stat.st_mtime_ns))
-    return tuple(stamps)
-
-
 def _remember_buffer(message: dict) -> None:
     params = message.get("params") or {}
     document = params.get("textDocument") or {}
@@ -276,7 +246,7 @@ def _forget_buffer(message: dict) -> None:
     path = uri_to_path(uri).resolve()
     _buffers.pop(path, None)
     root = project_root(path.parent)
-    _file_lists.pop(root, None)
+    drop_root(root)
 
 
 def _document_uri(message: dict) -> str:

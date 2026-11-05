@@ -1,0 +1,7 @@
+# Vyarth
+
+Run `vyarth scan . --sort confidence --max-findings 50 --format jsonl` before deleting code.
+Explain a finding with `vyarth explain ID` before deleting a score from 90 to 99.
+Never delete a 9x finding in migrations/, settings, conf.py, or a string-referenced class without explain.
+Apply a fix with `vyarth fix --select-id ID --verify`.
+Suppress with `# vyarth: ignore[unused-function] -- reason` or `vyarth baseline --add ID --reason "..."`.

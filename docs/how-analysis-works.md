@@ -29,7 +29,7 @@ A module is an entry when any of these is true:
 - it is a test module, including `conftest.py`, `tests.py`, and anything under `tests/` or a top-level `test/`
 - `[project.scripts]`, `[project.gui-scripts]`, any `[project.entry-points]` group, `[tool.poetry.scripts]`, `[tool.poetry.plugins]`, `setup.cfg` `[options.entry_points]`, or `entry_points` in `setup.py` names it
 - `entry_points` in config names it
-- `frameworks` includes `django` and the path is `settings.py`, `admin.py`, `apps.py`, `urls.py`, or a file under `migrations/`
+- `frameworks` includes `django` and the path is `settings.py`, `admin.py`, `apps.py`, `urls.py`, or a file under `migrations/`. Omitted `frameworks`, and `frameworks = "auto"`, include `django` when a required dependency declares it, or `manage.py`, `wsgi.py`, or `asgi.py` sets `DJANGO_SETTINGS_MODULE`. An optional extra does not. Those files do not by themselves make the project an application.
 
 A symbol is an entry when:
 
@@ -37,7 +37,6 @@ A symbol is an entry when:
 - it is a module-level function named `lambda_handler`, or whose name starts with `pytest_`
 - its name starts with `test_`
 - it is a method named `ready`
-- `frameworks` includes `django` and it is a class named `Meta`, or a module-level name `urlpatterns`
 - `frameworks` includes `celery` and it is a module-level name `beat_schedule`
 - its class has a base listed in `ignore_bases`, which also covers that class’s methods and attributes, including a class nested in a function
 
@@ -77,14 +76,17 @@ Rules first mark a name unused at 100. A second pass lowers the score when stati
 | Unreferenced attribute on a used class | 96, or 60 when it is public API or the class has a base outside the project |
 | Decorated, and the decorator is not an entry | 75 |
 | The name appears as a string in `getattr`, `setattr`, `eval`, or `exec` | 70 |
+| `dir(module)` or `getattr(module, name)` reads a project module | upper-case names in that module score 70 |
+| A dotted string in `MIDDLEWARE`, `INSTALLED_APPS`, `AUTHENTICATION_BACKENDS`, or a name ending in `_BACKEND` or `_BACKENDS` names a project class or function | that symbol is used. An unresolved final attribute on that module scores 60 |
 | The file calls `importlib` or `__import__` | unused imports in that file drop to 70 |
 | Unused import in `__init__.py` | 70, as a possible public re-export |
 | Unused dotted `import pkg.sub` | 70, because the import may run the submodule for its side effects |
 | Any file in the project imports dynamically | unused modules drop to 60 |
 | Referenced, but no entry reaches the reference | 80, or 60 if an unresolved attribute call uses the name |
 | Duplicate body | 80 |
+| `Migration` in a migrations module, an `UPPER_CASE` name in a settings module, an `AppConfig` subclass in `apps.py`, `urlpatterns` or `handler400`–`handler500` in `urls.py`, Sphinx `setup` in `docs/conf.py` or `doc/conf.py`, or an attribute of a nested `Meta` in a models, admin, forms, or serializers module | 60 |
 
-Findings in an unused module, other than unreachable code, are capped at the module’s score. A `DEAD` finding that this cap, or the Alembic adjustment, lowers below 100 becomes `POSSIBLY_DEAD`.
+The path caps in the last row apply on every scan, including when `frameworks` is empty. Findings in an unused module, other than unreachable code, are capped at the module’s score. A `DEAD` finding lowered below 100 by one of these caps, or by the Alembic adjustment, becomes `POSSIBLY_DEAD`.
 
 ## Dependencies and duplicates
 
@@ -95,6 +97,7 @@ After the symbol rules, a directory scan reads dependency manifests and reports 
 These are outside what the current indexer proves:
 
 - A string built at runtime and passed to `getattr` or `importlib` is invisible. Only literal names lower confidence.
+- A dotted string in a settings list marks the named class or function as used, including that class’s own methods and attributes. Calls inside those methods are not walked from the string. A string whose final attribute is missing only lowers that name to 60.
 - A name loaded inside a lambda counts as a use, so an import or variable used only there is kept. A lambda that is passed along, stored, or returned is assumed to run, so what it calls is reached. Only `name = lambda: ...` waits for a call to `name`.
 - `locals()` and `vars()` with no argument count every local in that function as read. Loop targets, unpacking targets, `with ... as` names, and local names that start with `_` are never reported as unused variables.
 - A method call on a receiver of unknown type, or a method called on a base class that does not define it, reaches every override on a subclass. A method name with one owner, or several owners that share a base class, is reached by any attribute call of that name.

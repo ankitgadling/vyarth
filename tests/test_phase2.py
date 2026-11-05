@@ -179,7 +179,7 @@ def test_baseline_filter_and_formats(tmp_path, capsys):
     assert result["partialFingerprints"]["vyarth/fingerprint"].startswith("UNUSED_FUNCTION:app.py:")
     rule = next(item for item in sarif["runs"][0]["tool"]["driver"]["rules"] if item["id"] == "UNUSED_FUNCTION")
     assert rule["fullDescription"]["text"] != result["message"]["text"]
-    assert rule["helpUri"].endswith("/docs/rules.md")
+    assert rule["helpUri"].endswith("/docs/rules.md#unused_function")
     assert sarif["runs"][0]["tool"]["driver"]["informationUri"] == "https://github.com/ankitgadling/vyarth"
 
 

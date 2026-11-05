@@ -18,7 +18,9 @@ from vyarth.graph import (
     public_surface,
     reachable_modules,
     reachable_symbols,
+    rebound_import_sources,
     reexported_symbol,
+    setting_string_symbols,
     subclass_registry_symbols,
     wildcard_references,
 )
@@ -66,6 +68,10 @@ def collect_findings(
     referenced |= import_hops(project)
     referenced |= subclass_registry_symbols(project)
     referenced |= set(entries.symbols)
+    referenced |= rebound_import_sources(project)
+    string_symbols, _string_misses = setting_string_symbols(project)
+    referenced |= string_symbols
+    reached |= string_symbols
     surface = public_surface(project, entries)
     for index in project.indexes:
         relpath = relative_posix(Path(index.path), project.root)
@@ -74,7 +80,18 @@ def collect_findings(
         findings.extend(_wildcard_findings(index, relpath))
         findings.extend(_unreachable_findings(index, relpath))
     findings.extend(orphan_findings(project, entries, referenced, exported, reached, unresolved, surface, progress))
-    findings.extend(class_attribute_findings(project, referenced, reached, unresolved, surface, progress))
+    convention_used = _meta_classes(project) if config.report_framework_conventions else frozenset()
+    findings.extend(
+        class_attribute_findings(
+            project,
+            referenced,
+            reached,
+            unresolved,
+            surface,
+            progress,
+            convention_used,
+        )
+    )
     if check_modules:
         _status(progress, "checking modules")
         findings.extend(_module_findings(project, entries, config))
@@ -114,6 +131,16 @@ def _without_entries(finding: Finding) -> Finding:
     if finding.rule != "ORPHAN_FUNCTION" or finding.confidence <= 60:
         return finding
     return replace(finding, confidence=60, evidence=finding.evidence + (_NO_ENTRY_NOTE,))
+
+
+def _meta_classes(project: Project) -> frozenset[tuple[str, str]]:
+    """Classes named `Meta`. Nothing else treats these as referenced."""
+    found: set[tuple[str, str]] = set()
+    for index in project.indexes:
+        for binding in index.bindings:
+            if binding.kind == "class" and binding.name == "Meta":
+                found.add((index.path, binding.qualname))
+    return frozenset(found)
 
 
 def _status(progress: ScanProgress | None, label: str, detail: str = "") -> None:

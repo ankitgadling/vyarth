@@ -132,7 +132,7 @@ def collect_entries(project: Project, config: Config) -> EntrySet:
             modules.add(dotted)
         in_tests = is_test_path(relpath)
         if not app and not in_tests:
-            app = _is_program_file(path, relpath, index.has_main_guard, entry_files, package_dirs, config)
+            app = _is_program_file(path, relpath, index.has_main_guard, package_dirs)
         decorated: dict[str, list[str]] = {}
         for item in index.decorators:
             decorated.setdefault(item.qualname, []).append(item.name)
@@ -157,13 +157,10 @@ def _is_program_file(
     path: Path,
     relpath: str,
     has_main_guard: bool,
-    entry_files: pathspec.GitIgnoreSpec,
     package_dirs: set[Path],
-    config: Config,
 ) -> bool:
+    """A real program. Django entry files do not count: a reusable app stays a library."""
     if path.name in _APP_FILE_NAMES:
-        return True
-    if "django" in config.frameworks and entry_files.match_file(relpath) and path.name != "conf.py":
         return True
     if not has_main_guard or path.name in _TOOLING_FILE_NAMES:
         return False
@@ -208,7 +205,7 @@ def _console_scripts(root: Path) -> list[tuple[str, str]]:
 def _symbol_is_entry(
     binding: Binding,
     decorator_names: list[str],
-    config: Config,
+    _config: Config,
     relpath: str,
     extra_decorators: tuple[str, ...],
 ) -> bool:
@@ -217,8 +214,6 @@ def _symbol_is_entry(
     if any(is_entry_decorator(name, extra_decorators) for name in decorator_names):
         return True
     if binding.scope_kind == "module" and binding.kind == "function" and binding.name.startswith("pytest_"):
-        return True
-    if "django" in config.frameworks and binding.kind == "class" and binding.name == "Meta":
         return True
     if binding.scope_kind == "module" and binding.kind == "function" and binding.name in {"lambda_handler"}:
         return True
@@ -234,8 +229,6 @@ def _symbol_is_entry(
 def _framework_value(binding: Binding, config: Config) -> bool:
     if binding.scope_kind != "module" or binding.kind != "variable":
         return False
-    if "django" in config.frameworks and binding.name == "urlpatterns":
-        return True
     return "celery" in config.frameworks and binding.name == "beat_schedule"
 
 

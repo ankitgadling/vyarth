@@ -131,8 +131,10 @@ def test_framework_presets_and_ignore_lists(tmp_path):
         ignore_names=("skipped",),
         ignore_bases=("BasePlugin",),
     )
-    symbols = {finding.symbol for finding in scan(tmp_path, config=config).findings}
-    assert "urlpatterns" not in symbols
+    findings = scan(tmp_path, config=config).findings
+    symbols = {finding.symbol for finding in findings}
+    urlpatterns = [finding for finding in findings if finding.symbol == "urlpatterns"]
+    assert urlpatterns and all(item.confidence <= 60 for item in urlpatterns)
     assert "beat_schedule" not in symbols
     assert "clean" not in symbols
     assert "helper" not in symbols
@@ -258,6 +260,20 @@ def test_unwritable_cache_does_not_fail_the_scan(tmp_path, monkeypatch):
     monkeypatch.setattr("vyarth.incremental.ensure_cache_markers", deny)
     result = scan(tmp_path)
     assert any(item.symbol == "dead" for item in result.findings)
+
+
+def test_frameworks_parsing(tmp_path):
+    def written(text: str) -> Config:
+        (tmp_path / "vyarth.toml").write_text(text, encoding="utf-8")
+        return load_config(tmp_path)
+
+    assert written("min_confidence = 0\n").frameworks == ()
+    assert written('frameworks = "auto"\n').frameworks == ()
+    assert written("frameworks = []\n").frameworks == ()
+    assert written('frameworks = "django"\n').frameworks == ("django",)
+    assert written('frameworks = ["pydantic", "celery"]\n').frameworks == ("pydantic", "celery")
+    with pytest.raises(ValueError, match="unknown frameworks"):
+        written('frameworks = ["nope"]\n')
 
 
 def test_config_validation(tmp_path):

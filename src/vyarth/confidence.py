@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import re
 
-from vyarth.discover import relative_posix
-from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding
+from vyarth.discover import import_target, indexes_by_module, package_roots, relative_posix
+from vyarth.graph import setting_string_symbols, swept_setting_paths
+from vyarth.model import PUBLIC_NAME_NOTE, FileIndex, Finding, ImportEdge
+from vyarth.project import build_project
 
 
 _NEUTRAL_DECORATORS = {
@@ -48,6 +51,16 @@ _CAPPED_RULES = {
     "DUPLICATE_CODE",
 }
 _ALEMBIC_NAMES = {"upgrade", "downgrade", "revision", "down_revision", "branch_labels", "depends_on"}
+_FRAMEWORK_CONVENTION_NOTE = "Framework convention. This name is loaded by the framework without a local reference."
+_STRING_REFERENCE_NOTE = "Named by a dotted string. The final attribute was not found on that module."
+_SETTINGS_SWEEP_NOTE = "This module is read with getattr or dir(), so this name may be loaded by that loop."
+_URL_SYMBOLS = frozenset({"urlpatterns", "handler400", "handler403", "handler404", "handler500"})
+BOOT_FILE_NAMES = frozenset({"manage.py", "wsgi.py", "asgi.py"})
+DJANGO_SETTINGS_ASSIGNMENT = re.compile(
+    r"""DJANGO_SETTINGS_MODULE["'](?:\s*\]\s*=\s*["']|\s*,\s*["'])([A-Za-z_][\w.]*)"""
+)
+_META_FILE_NAMES = frozenset({"models.py", "admin.py", "forms.py", "serializers.py"})
+_META_DIR_NAMES = frozenset({"models", "admin", "forms", "serializers"})
 
 
 def apply_confidence(findings: list[Finding], indexes: list[FileIndex], root: Path) -> list[Finding]:
@@ -62,6 +75,12 @@ def apply_confidence(findings: list[Finding], indexes: list[FileIndex], root: Pa
         for finding in adjusted
         if finding.rule == "POSSIBLY_UNUSED_MODULE"
     }
+    settings_paths = _django_settings_modules(indexes)
+    roots = package_roots(root)
+    by_module = indexes_by_module(indexes, roots)
+    project = build_project(indexes, root)
+    _used_strings, string_misses = setting_string_symbols(project)
+    swept = swept_setting_paths(project)
     capped: list[Finding] = []
     for finding in adjusted:
         finding = _alembic(finding)
@@ -73,6 +92,15 @@ def apply_confidence(findings: list[Finding], indexes: list[FileIndex], root: Pa
                 status=_lowered_status(finding.status),
                 evidence=_with_note(finding.evidence, _MODULE_CAP_NOTE),
             )
+        finding = _framework_convention(
+            finding,
+            by_path.get(finding.path),
+            settings_paths,
+            by_module,
+            roots,
+        )
+        finding = _string_reference(finding, string_misses)
+        finding = _settings_sweep(finding, swept)
         capped.append(finding)
     return capped
 
@@ -151,6 +179,38 @@ def _adjust(finding: Finding, index: FileIndex | None, project_imports_dynamical
     )
 
 
+def _string_reference(finding: Finding, misses: set[tuple[str, str]]) -> Finding:
+    """A dotted string named this module, and its final attribute is not a binding."""
+    if finding.rule not in {"UNUSED_CLASS", "UNUSED_FUNCTION"}:
+        return finding
+    if (finding.path, finding.symbol) not in misses:
+        return finding
+    return _cap(finding, 60, _STRING_REFERENCE_NOTE)
+
+
+def _settings_sweep(finding: Finding, paths: set[str]) -> Finding:
+    """`getattr(module, name)` or `dir(module)` can read an upper-case settings name."""
+    if finding.path not in paths or "." in _qualname(finding):
+        return finding
+    if finding.rule not in {"UNUSED_VARIABLE", "UNUSED_CLASS", "UNUSED_FUNCTION"}:
+        return finding
+    if not _is_upper_name(finding.symbol):
+        return finding
+    return _cap(finding, 70, _SETTINGS_SWEEP_NOTE)
+
+
+def _cap(finding: Finding, score: int, note: str) -> Finding:
+    evidence = _with_note(finding.evidence, note)
+    if finding.confidence <= score and evidence == finding.evidence:
+        return finding
+    return replace(
+        finding,
+        confidence=min(finding.confidence, score),
+        status=_lowered_status(finding.status) if finding.confidence > score else finding.status,
+        evidence=evidence,
+    )
+
+
 def _unrecognized_decorator(index: FileIndex, qualname: str) -> bool:
     names = [item.name for item in index.decorators if item.qualname == qualname]
     if not names:
@@ -180,6 +240,220 @@ def _import_dynamic(index: FileIndex) -> bool:
         if marker.name in {"__import__", "import_module"} or marker.name.startswith("importlib."):
             return True
     return False
+
+
+def _framework_convention(
+    finding: Finding,
+    index: FileIndex | None,
+    settings_paths: frozenset[str],
+    by_module: dict[str, FileIndex],
+    roots: list[Path],
+) -> Finding:
+    """Cap names a framework loads by file shape. This does not consult `frameworks`."""
+    if not _matches_convention(finding, index, settings_paths, by_module, roots):
+        return finding
+    evidence = _with_note(finding.evidence, _FRAMEWORK_CONVENTION_NOTE)
+    if finding.confidence <= 60 and evidence == finding.evidence:
+        return finding
+    return replace(
+        finding,
+        confidence=min(finding.confidence, 60),
+        status=_lowered_status(finding.status) if finding.confidence > 60 else finding.status,
+        evidence=evidence,
+    )
+
+
+def _matches_convention(
+    finding: Finding,
+    index: FileIndex | None,
+    settings_paths: frozenset[str],
+    by_module: dict[str, FileIndex],
+    roots: list[Path],
+) -> bool:
+    if _meta_attribute(finding):
+        return True
+    if "." in _qualname(finding):
+        return False
+    path = finding.path.replace("\\", "/")
+    if finding.rule == "UNUSED_CLASS" and finding.symbol == "Migration" and _in_migrations_package(path):
+        return True
+    if _is_settings_path(path, settings_paths) and _is_upper_name(finding.symbol):
+        return True
+    if (
+        path.rsplit("/", 1)[-1] == "apps.py"
+        and finding.rule == "UNUSED_CLASS"
+        and index is not None
+        and _is_appconfig_subclass(index, _qualname(finding), by_module, roots)
+    ):
+        return True
+    if path.rsplit("/", 1)[-1] == "urls.py" and finding.symbol in _URL_SYMBOLS:
+        return True
+    return finding.rule == "UNUSED_FUNCTION" and finding.symbol == "setup" and _sphinx_conf(path)
+
+
+def _meta_attribute(finding: Finding) -> bool:
+    """A nested `Meta` in a models, admin, forms, or serializers module."""
+    parts = _qualname(finding).split(".")
+    if len(parts) < 3 or parts[-2] != "Meta":
+        return False
+    path = finding.path.replace("\\", "/")
+    name = path.rsplit("/", 1)[-1]
+    if name in _META_FILE_NAMES:
+        return True
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    return parent.rsplit("/", 1)[-1] in _META_DIR_NAMES and name.endswith(".py")
+
+
+def _in_migrations_package(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    if name == "__init__.py":
+        return False
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    return parent.rsplit("/", 1)[-1] == "migrations"
+
+
+def _is_settings_path(path: str, extra: frozenset[str]) -> bool:
+    if any(_settings_module_path(path, item) for item in extra):
+        return True
+    name = path.rsplit("/", 1)[-1]
+    stem = name[:-3] if name.endswith(".py") else name
+    if name == "settings.py" or name.endswith("_settings.py") or "settings" in stem.lower():
+        return True
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    return parent.rsplit("/", 1)[-1] == "settings" and name.endswith(".py")
+
+
+def _settings_module_path(path: str, item: str) -> bool:
+    """True when `path` is the file recorded for one `DJANGO_SETTINGS_MODULE`.
+
+    A dotted module may sit under `src/` or another import root, so
+    `myproject/settings.py` matches `src/myproject/settings.py`. A one-segment
+    module records `config.py` or `config/__init__.py` and matches only that
+    path, or the same path under `src/`. `pkg/config.py` is a different module.
+    """
+    if path == item or path == f"src/{item}":
+        return True
+    if not _dotted_settings_record(item):
+        return False
+    return path.endswith("/" + item)
+
+
+def _dotted_settings_record(item: str) -> bool:
+    if "/" not in item:
+        return False
+    parent, _, name = item.rpartition("/")
+    return not (name == "__init__.py" and "/" not in parent)
+
+
+def _is_upper_name(name: str) -> bool:
+    letters = [char for char in name if char.isalpha()]
+    return bool(letters) and all(char.isupper() for char in letters)
+
+
+def _sphinx_conf(path: str) -> bool:
+    parts = path.split("/")
+    return parts[-1] == "conf.py" and bool({"docs", "doc"}.intersection(parts[:-1]))
+
+
+def _django_settings_modules(indexes: list[FileIndex]) -> frozenset[str]:
+    """Modules named by `DJANGO_SETTINGS_MODULE` in manage.py, wsgi.py, or asgi.py."""
+    found: set[str] = set()
+    for index in indexes:
+        path = Path(index.path)
+        if path.name not in BOOT_FILE_NAMES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for match in DJANGO_SETTINGS_ASSIGNMENT.finditer(text):
+            slash = "/".join(match.group(1).split("."))
+            found.add(f"{slash}.py")
+            found.add(f"{slash}/__init__.py")
+    return frozenset(found)
+
+
+def _is_appconfig_subclass(
+    index: FileIndex,
+    qualname: str,
+    by_module: dict[str, FileIndex],
+    roots: list[Path],
+    seen: set[tuple[str, str]] | None = None,
+) -> bool:
+    if seen is None:
+        seen = set()
+    key = (index.path, qualname)
+    if key in seen:
+        return False
+    seen.add(key)
+    bases = dict(index.class_bases).get(qualname)
+    if not bases:
+        return False
+    for base in bases:
+        if _base_is_appconfig(index, base):
+            return True
+        followed = _followed_base(index, base, by_module, roots)
+        if followed is not None and _is_appconfig_subclass(followed[0], followed[1], by_module, roots, seen):
+            return True
+        if not base.startswith("@") and _is_appconfig_subclass(index, base, by_module, roots, seen):
+            return True
+    return False
+
+
+def _followed_base(
+    index: FileIndex,
+    base: str,
+    by_module: dict[str, FileIndex],
+    roots: list[Path],
+) -> tuple[FileIndex, str] | None:
+    """The project class a base refers to in another file."""
+    if base.startswith("@import:"):
+        edge = _import_edge(index, base[len("@import:") :])
+        if edge is None or not edge.imported_name:
+            return None
+        module = import_target(edge.module, edge.level, Path(index.path), roots)
+        name = edge.imported_name
+    elif base.startswith("@expr:"):
+        dotted = base[len("@expr:") :]
+        module, separator, name = dotted.rpartition(".")
+        if not separator or not module:
+            return None
+    else:
+        return None
+    if not module:
+        return None
+    target = by_module.get(module)
+    if target is None:
+        return None
+    if not any(item.kind == "class" and item.qualname == name for item in target.bindings):
+        return None
+    return target, name
+
+
+def _import_edge(index: FileIndex, local: str) -> ImportEdge | None:
+    for edge in index.imports:
+        if (edge.alias or edge.imported_name or "") == local:
+            return edge
+    return None
+
+
+def _base_is_appconfig(index: FileIndex, base: str) -> bool:
+    if base.startswith("@expr:"):
+        leaf = base[len("@expr:") :]
+    elif base.startswith("@import:"):
+        leaf = _imported_leaf(index, base[len("@import:") :])
+    else:
+        leaf = base
+    return leaf.rsplit(".", 1)[-1] == "AppConfig"
+
+
+def _imported_leaf(index: FileIndex, local: str) -> str:
+    """Original imported name for a local alias. `AppConfig as AC` yields `AppConfig`."""
+    for edge in index.imports:
+        bound = edge.alias or edge.imported_name or ""
+        if bound == local and edge.imported_name:
+            return edge.imported_name
+    return local
 
 
 def _alembic(finding: Finding) -> Finding:

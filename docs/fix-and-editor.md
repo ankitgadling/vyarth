@@ -10,7 +10,7 @@ vyarth fix . --diff
 vyarth fix . --unsafe
 ```
 
-`fix` scans, rewrites the edits that are safe to delete, and scans again. Each edit prints a note such as `fixed pkg/app.py:4 helper`. The report after the rescan is the command output. The same flags as `scan` apply to both passes.
+`fix` scans, rewrites the edits that are safe to delete, and scans again. A name at 90–99 is a review item: it is not deleted unless `--unsafe-fixes` and `--select-id` name it, and a module-level 90–99 name is never deleted. `--unsafe` stays the switch for confidence-70 package re-exports and side-effect imports. It does not delete 90–99 names, and `--unsafe-fixes` does not turn those imports on. Each edit prints a note such as `fixed pkg/app.py:4 helper`. The report after the rescan is the command output. The same flags as `scan` apply to both passes.
 
 `--dry-run` prints `would fix` notes and does not write or rescan. `--diff` prints a unified diff and does not write. `--unsafe` also removes the two import categories below. It does not remove an import that was lowered because the file imports dynamically or the import is an `ImportError` probe.
 
@@ -23,11 +23,13 @@ These findings are rewritten when confidence is 100, except an unused import, wh
 | `UNUSED_FUNCTION` whose qualname is nested | Delete the nested function, including its decorators. |
 | `UNUSED_VARIABLE` whose qualname is nested | Delete the assignment when every name on that line is an unused local and the value is only constants, names, or containers of those. A call, `await`, `yield`, subscript, attribute, or walrus stays. |
 
-If a deletion would empty a `def`, `class`, `if`, `for`, `while`, `try`, `with`, `except`, or `match` body, that body becomes `pass`. The rewrite is skipped when the result would not parse. Line endings, the coding cookie, and a UTF-8 BOM are preserved.
+If a deletion would empty a `def`, `class`, `if`, `for`, `while`, `try`, `with`, `except`, or `match` body, that body becomes `pass`. The rewrite is skipped when the result would not parse. Line endings, the coding cookie, and a UTF-8 BOM are preserved. In a git worktree, an edit that covers lines already changed since `HEAD` is skipped and reported as `dirty_lines`. Other edits in that file still apply. `--require-clean` refuses the fix when `git status` is not empty.
+
+`--verify` stores the original bytes in memory and under `.vyarth/backup/<timestamp>/`, writes the edits, then runs `python -m py_compile` on the touched files. It does not import them. When a command is passed, or `fix_verify_command` is set, that command runs next, in the project root, with `fix_verify_timeout` seconds. If a check fails, every touched file is restored byte for byte and the process exits 3 with `verified`, `rolled_back`, `failed_step`, and `output_tail`. `--exit-zero` does not hide exit 3. `--verify-each` repeats the check per file and keeps the files that pass.
 
 Module-level functions, classes, methods, and module-level assignments stay reported. A line that mixes an import with another statement is left alone, and so is a wildcard import. A trailing comment on an import line is kept when the statement remains.
 
-`vyarth.fix.rewrite_source(source, findings, relpath)` applies the same edits to a string and returns `(new_source, notes)`. Pass `unsafe=True` to include the `__init__.py` and dotted-import edits. `apply_fixes(root, findings)` writes the files. `is_fixable(finding, source=None)` reports whether a finding is a candidate before the syntax checks that can still skip it. Pass the file text so the sole-yield guard can refuse an unreachable generator yield.
+`vyarth.fix.rewrite_source(source, findings, relpath)` applies the same edits to a string and returns `(new_source, notes)`. Pass `unsafe=True` to include the `__init__.py` and dotted-import edits. `apply_fixes(root, findings)` writes the files. `apply_fixes_verified(root, findings)` writes them and restores the snapshot when verification fails. `is_fixable(finding, source=None)` reports whether a finding is a candidate before the syntax checks that can still skip it. Pass the file text so the sole-yield guard can refuse an unreachable generator yield. `--show-fixes` includes the edit preview for both `safe` and `unsafe` findings.
 
 ## Language server
 

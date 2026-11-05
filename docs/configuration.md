@@ -19,6 +19,16 @@ workers = 1
 duplicate_min_statements = 5
 min_confidence = 0
 report_dev_dependencies = false
+report_framework_conventions = false
+fix_verify_command = "pytest -x -q"
+fix_verify_timeout = 60
+require_ignore_reason = false
+report_unused_ignores = false
+
+[[tool.vyarth.allow]]
+symbol = "saleor.settings.*"
+rule = "unused-variable"
+reason = "Django settings are read via django.conf.settings"
 
 [tool.vyarth.fold]
 ENVIRONMENT = "production"
@@ -30,7 +40,7 @@ ENVIRONMENT = "production"
 | `exclude` | none | Do not index these paths. Added on top of the built-in excludes. |
 | `entry_patterns` | see below | Files that count as entry modules. Setting this key replaces the default list. |
 | `framework_decorators` | none | Extra decorator names that mark a function or class as an entry. |
-| `frameworks` | none | Opt-in presets: `django`, `pydantic`, `celery`. An unknown name fails the scan. |
+| `frameworks` | `auto` | `django`, `pydantic`, and `celery`. `auto` turns on `django` for a runtime dependency or `DJANGO_SETTINGS_MODULE` in `manage.py`. `[]` turns presets off. |
 | `ignore_names` | none | `fnmatch` patterns. A finding whose symbol matches is dropped. |
 | `ignore_decorators` | none | Decorator names that mark a symbol as an entry, same matching as `framework_decorators`. |
 | `ignore_bases` | none | A class with one of these bases is used, and its methods and attributes are not reported. |
@@ -41,11 +51,17 @@ ENVIRONMENT = "production"
 | `duplicate_min_statements` | `5` | Minimum statement count before two function bodies can be reported as duplicates. |
 | `min_confidence` | `0` | Drop findings below this score. Must be from 0 to 100. |
 | `report_dev_dependencies` | `false` | Report development and docs dependencies. They score 70. |
+| `report_framework_conventions` | `false` | Report attributes of a class named `Meta`. They score 60 or below. |
+| `fix_verify_command` | none | Command `vyarth fix --verify` runs after `py_compile`. The flag with no command uses this value. |
+| `fix_verify_timeout` | `60` | Seconds before `py_compile` or `fix_verify_command` is stopped. |
+| `require_ignore_reason` | `false` | An ignore comment with no reason does not suppress, and it is reported as `IGNORE_WITHOUT_REASON`. |
+| `report_unused_ignores` | `false` | Report `UNUSED_IGNORE` for a directive that suppressed nothing. |
+| `allow` | none | A list of tables with `symbol`, an optional `rule`, and a `reason`. The symbol is a dotted qualname glob. |
 | `fold` | none | Names folded to constants. Values are strings, numbers, or booleans. |
 
 A command-line flag overrides the matching config key for that run: `--min-confidence`, `--baseline`, `--fail-on`, `--workers`, and `--define`. `--min-confidence` must be from 0 to 100 and `--workers` must be zero or positive. A value outside that range exits 2.
 
-Invalid values fail the scan with exit code 2. `min_confidence`, `workers`, and `duplicate_min_statements` must be integers. `min_confidence` must be from 0 to 100. `duplicate_min_statements` must be at least 1. `workers` must be zero or positive. `fail_on` must be `high`, `medium`, or `low`. `report_dev_dependencies` must be a boolean. `frameworks` must be names from `django`, `pydantic`, and `celery`. List options must be strings or arrays of strings. `fold` must be a table. A key Vyarth does not recognize prints a warning and does not fail the scan.
+Invalid values fail the scan with exit code 2. `min_confidence`, `workers`, `duplicate_min_statements`, and `fix_verify_timeout` must be integers. `min_confidence` must be from 0 to 100. `duplicate_min_statements` and `fix_verify_timeout` must be at least 1. `workers` must be zero or positive. `fail_on` must be `high`, `medium`, or `low`. `report_dev_dependencies`, `report_framework_conventions`, `require_ignore_reason`, and `report_unused_ignores` must be booleans. `fix_verify_command` must be a string. `allow` must be a list of tables, each with a `symbol`. `frameworks` must be `auto`, or names from `django`, `pydantic`, and `celery`. A string and an array are both accepted. List options must be strings or arrays of strings. `fold` must be a table. A key Vyarth does not recognize prints a warning and does not fail the scan.
 
 ## Paths that are never scanned
 
@@ -85,9 +101,9 @@ bin/**/*.py
 
 `framework_decorators` matches the decorator’s full name or its final attribute. `myapp.route` matches `@myapp.route` and `@route` does not, unless you also list `route`. The built-in hook names are always recognized. `ignore_decorators` uses the same match and makes the decorated symbol an entry, so its body stays reachable. See [How analysis works](how-analysis-works.md).
 
-`frameworks` is empty unless you set it. The presets add to the entry list. They do not replace `entry_patterns`.
+`frameworks` is `auto` when the key is omitted. That turns on the `django` preset when a required dependency declares `django`, or when `manage.py`, `wsgi.py`, or `asgi.py` assigns `DJANGO_SETTINGS_MODULE`. Required dependencies are `[project] dependencies`, `[tool.poetry.dependencies]` (unless `optional = true`), `requirements.txt`, a Pipfile `[packages]` table, and `install_requires` in `setup.py` or `setup.cfg`. An optional extra, a Poetry group, `dependency-groups`, `requirements-dev.txt`, a file under `examples/`, and an `INSTALLED_APPS` list do not. `frameworks = []` opts out. The presets add to the entry list. They do not replace `entry_patterns`, and they do not mark the project as an application. `manage.py`, `wsgi.py`, and `asgi.py` still do.
 
-- `django` treats `**/settings.py`, `**/admin.py`, `**/apps.py`, `**/urls.py`, and `**/migrations/*.py` as entry files. A nested class named `Meta` is an entry. A module-level `urlpatterns` is used.
+- `django` treats `**/settings.py`, `**/admin.py`, `**/apps.py`, `**/urls.py`, and `**/migrations/*.py` as entry files. A class named `Migration` in a migrations module, an `UPPER_CASE` name in a settings module (a `settings.py` file, a name ending in `_settings.py`, a module under a `settings` package, or any module whose name contains `settings`), an `AppConfig` subclass in `apps.py`, and `urlpatterns` or `handler400`, `handler403`, `handler404`, and `handler500` in `urls.py` stay in the report at 60 or below. Those caps also apply when `frameworks` is empty. A subclass of an `AppConfig` subclass defined in another project file is included. A nested class named `Meta` is not an entry. Its attributes are reported only when `report_framework_conventions` is true, and they are capped in a `models`, `admin`, `forms`, or `serializers` module.
 - `pydantic` treats `validator`, `field_validator`, `model_validator`, `computed_field`, `field_serializer`, and `model_serializer` as entry decorators.
 - `celery` already counts `task` and `shared_task`. It also treats a module-level `beat_schedule` as used.
 

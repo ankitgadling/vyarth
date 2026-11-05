@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import os
 from pathlib import Path
 import re
@@ -113,6 +114,8 @@ _EXAMPLE_PARTS = {
     "benchmarks",
 }
 _SKIP_DIRS = MANIFEST_SKIP_DIRS
+# name, line, dev-only, optional extra or Poetry optional dependency
+_DeclaredPackage = tuple[str, int, bool, bool]
 _IMPORT_ALIAS = {
     "psycopg2-binary": "psycopg2",
     "pyjwt": "jwt",
@@ -143,7 +146,7 @@ def dependency_findings(
         if error is not None:
             errors.append(error)
         relpath = manifest.relative_to(root).as_posix()
-        for name, line, dev in packages:
+        for name, line, dev, _optional in packages:
             key = _canonical(name)
             if not key or key == "python":
                 continue
@@ -207,8 +210,8 @@ def selected_manifests(paths: list[Path], root: Path, within: Path | None) -> li
 def _read_collected(
     manifests: list[Path],
     root: Path,
-) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
-    rows: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
+) -> list[tuple[Path, list[_DeclaredPackage], ParseError | None]]:
+    rows: list[tuple[Path, list[_DeclaredPackage], ParseError | None]] = []
     for path in manifests:
         packages, error = _read_manifest(path, root)
         rows.append((path, packages, error))
@@ -369,6 +372,22 @@ def _top_level(name: str) -> str:
     return name.split(".", 1)[0]
 
 
+def has_runtime_requirement(root: Path, name: str, config: Config | None = None) -> bool:
+    """True when a required dependency declares `name`.
+
+    Dev, docs, and test groups do not count. Neither does an optional extra,
+    including one whose name is not itself a dev extra.
+    """
+    target = _canonical(name)
+    if config is None:
+        config = Config()
+    for _manifest, packages, _error in _declared(root, config):
+        for package, _line, dev, optional in packages:
+            if not dev and not optional and _canonical(package) == target:
+                return True
+    return False
+
+
 def _canonical(name: str) -> str:
     normalized = _PEP503.sub("-", name.strip().lower())
     return _CANONICAL.get(normalized, normalized)
@@ -377,8 +396,8 @@ def _canonical(name: str) -> str:
 def _declared(
     root: Path,
     config: Config,
-) -> list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]]:
-    found: list[tuple[Path, list[tuple[str, int, bool]], ParseError | None]] = []
+) -> list[tuple[Path, list[_DeclaredPackage], ParseError | None]]:
+    found: list[tuple[Path, list[_DeclaredPackage], ParseError | None]] = []
     root = root.resolve()
     exclude_spec, gitignore = exclusion_specs(root, config)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -404,7 +423,7 @@ def _declared(
     return found
 
 
-def _read_manifest(path: Path, root: Path) -> tuple[list[tuple[str, int, bool]], ParseError | None]:
+def _read_manifest(path: Path, root: Path) -> tuple[list[_DeclaredPackage], ParseError | None]:
     try:
         if path.name == "requirements.txt":
             return _tag(_requirements(path), _docs_requirements(path, root)), None
@@ -416,7 +435,9 @@ def _read_manifest(path: Path, root: Path) -> tuple[list[tuple[str, int, bool]],
             return _pipfile(path), None
         if path.name == "setup.py":
             return _tag(_setup(path), False), None
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError, ValueError) as exc:
+        if path.name == "setup.cfg":
+            return _tag(_setup_cfg(path), False), None
+    except (tomllib.TOMLDecodeError, configparser.Error, UnicodeDecodeError, OSError, ValueError) as exc:
         return [], ParseError(path=relative_posix(path, root), line=1, column=1, message=str(exc))
     return [], None
 
@@ -447,27 +468,27 @@ def _dev_extra(name: str) -> bool:
     return normalized in _DEV_EXTRAS or normalized.endswith("-dev")
 
 
-def _tag(packages: list[tuple[str, int]], dev: bool) -> list[tuple[str, int, bool]]:
-    return [(name, line, dev) for name, line in packages]
+def _tag(packages: list[tuple[str, int]], dev: bool, *, optional: bool = False) -> list[_DeclaredPackage]:
+    return [(name, line, dev, optional) for name, line in packages]
 
 
-def _pyproject(path: Path) -> list[tuple[str, int, bool]]:
+def _pyproject(path: Path) -> list[_DeclaredPackage]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
     lines = path.read_text(encoding="utf-8-sig").splitlines()
-    packages: list[tuple[str, int, bool]] = []
+    packages: list[_DeclaredPackage] = []
     project = data.get("project", {})
     if isinstance(project, dict):
         packages.extend(_tag(_requirement_list(project.get("dependencies"), lines), False))
         optional = project.get("optional-dependencies", {})
         if isinstance(optional, dict):
             for group_name, group in optional.items():
-                packages.extend(_tag(_requirement_list(group, lines), _dev_extra(group_name)))
+                packages.extend(_tag(_requirement_list(group, lines), _dev_extra(group_name), optional=True))
     poetry = data.get("tool", {})
     if isinstance(poetry, dict):
         poetry_table = poetry.get("poetry", {})
         if isinstance(poetry_table, dict):
-            packages.extend(_tag(_toml_keys(poetry_table.get("dependencies"), lines), False))
+            packages.extend(_poetry_requires(poetry_table.get("dependencies"), lines))
             groups = poetry_table.get("group", {})
             if isinstance(groups, dict):
                 for group in groups.values():
@@ -483,13 +504,45 @@ def _pyproject(path: Path) -> list[tuple[str, int, bool]]:
     return packages
 
 
-def _pipfile(path: Path) -> list[tuple[str, int, bool]]:
+def _poetry_requires(value: object, lines: list[str]) -> list[_DeclaredPackage]:
+    """Poetry dependencies. `optional = true` stays out of the required set."""
+    if not isinstance(value, dict):
+        return []
+    found: list[_DeclaredPackage] = []
+    for name, spec in value.items():
+        optional = isinstance(spec, dict) and spec.get("optional") is True
+        found.append((str(name), _line_of(lines, str(name)), False, optional))
+    return found
+
+
+def _pipfile(path: Path) -> list[_DeclaredPackage]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
     lines = path.read_text(encoding="utf-8-sig").splitlines()
-    packages: list[tuple[str, int, bool]] = []
+    packages: list[_DeclaredPackage] = []
     packages.extend(_tag(_toml_keys(data.get("packages"), lines), False))
     packages.extend(_tag(_toml_keys(data.get("dev-packages"), lines), True))
+    return packages
+
+
+def _setup_cfg(path: Path) -> list[tuple[str, int]]:
+    """`install_requires` from setup.cfg. `file:` pointers are left to that file."""
+    parser = configparser.RawConfigParser()
+    try:
+        parser.read(path, encoding="utf-8")
+    except configparser.Error as exc:
+        raise ValueError(str(exc)) from exc
+    if not parser.has_option("options", "install_requires"):
+        return []
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    packages: list[tuple[str, int]] = []
+    for piece in parser.get("options", "install_requires").splitlines():
+        text = piece.strip()
+        if not text or text.startswith("file:"):
+            continue
+        match = _NAME.match(text)
+        if match:
+            packages.append((match.group(1), _line_of(lines, match.group(1))))
     return packages
 
 

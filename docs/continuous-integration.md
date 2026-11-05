@@ -30,6 +30,10 @@ SARIF upload uses the same scan:
 
 Each SARIF result includes `partialFingerprints.vyarth/fingerprint`, so a code-scanning backend can track the same finding across runs.
 
+The repository also ships `action.yml`. It installs this package, writes SARIF, and uploads it with `github/codeql-action/upload-sarif`. Inputs are `path`, `min-confidence`, `fail-on`, and `baseline`.
+
+A pre-commit hook is in `.pre-commit-hooks.yaml`. It runs `vyarth scan --changed --fail-on high --format concise` and does not take filenames, because the scan still indexes the whole project. On a repository the size of Saleor, prefer the Action.
+
 ## Baseline
 
 Generate the file once, commit it, and pass it on later scans:
@@ -39,16 +43,20 @@ vyarth baseline .
 vyarth scan . --baseline vyarth-baseline.json --fail-on high
 ```
 
-`vyarth-baseline.json` is a sorted list:
+`vyarth-baseline.json` is version 2, a sorted list. Version 1 files and plain fingerprint strings still load.
 
 ```json
 {
+  "version": 2,
   "findings": [
     {
       "fingerprint": "UNUSED_FUNCTION:pkg/app.py:helper",
+      "id": "VY7K2QF9XA",
       "rule": "UNUSED_FUNCTION",
       "path": "pkg/app.py",
-      "symbol": "helper"
+      "symbol": "helper",
+      "reason": "",
+      "added": "2026-11-04"
     }
   ]
 }

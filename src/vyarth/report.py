@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from vyarth.model import Finding, ScanResult
+from vyarth.reasons import BRIEF_EVIDENCE
 
 
 _HELP_URI = "https://github.com/ankitgadling/vyarth/blob/main/docs/rules.md"
@@ -38,6 +39,8 @@ _LABELS = {
     "DUPLICATE_CODE": "Function",
 }
 
+_BRIEF_JSONL_OMIT = ("rule_url", "kind", "end_line", "end_column", "qualname", "baselined")
+
 _WITH_REASON = {
     "UNREACHABLE_CODE",
     "POSSIBLY_UNUSED_MODULE",
@@ -48,22 +51,56 @@ _WITH_REASON = {
 }
 
 
-def render_text(result: ScanResult) -> str:
-    blocks = [_render_finding(finding) for finding in result.findings]
+def render_text(result: ScanResult, *, brief_evidence: bool = False) -> str:
+    blocks = [_render_finding(finding, brief_evidence=brief_evidence) for finding in result.findings]
     if not blocks:
         return ""
     return "\n\n".join(blocks) + "\n"
 
 
-def render_json(result: ScanResult) -> str:
-    return result.to_json()
+def render_json(
+    result: ScanResult,
+    root: Path | None = None,
+    *,
+    show_fixes: bool = False,
+    applied: list[dict] | None = None,
+    brief_evidence: bool = False,
+) -> str:
+    return result.to_json(root=root, show_fixes=show_fixes, applied=applied, brief_evidence=brief_evidence)
 
 
-def render_concise(result: ScanResult) -> str:
+def render_jsonl(
+    result: ScanResult,
+    root: Path | None = None,
+    *,
+    show_fixes: bool = False,
+    applied: list[dict] | None = None,
+    brief_evidence: bool = True,
+) -> str:
+    report = result.to_report(
+        root=root,
+        show_fixes=show_fixes,
+        applied=applied,
+        brief_evidence=brief_evidence,
+    )
     lines = [
-        f"{finding.path}:{finding.line}:{finding.column}: {finding.rule} {finding.message}"
-        for finding in result.findings
+        json.dumps(_jsonl_row(finding, brief_evidence), separators=(",", ":"))
+        for finding in report["findings"]
     ]
+    summary = {"type": "summary", **report["summary"]}
+    if applied is not None:
+        summary["applied"] = report["applied"]
+    lines.append(json.dumps(summary, separators=(",", ":")))
+    return "\n".join(lines) + "\n"
+
+
+def render_concise(result: ScanResult, *, confidence: bool = False) -> str:
+    lines = []
+    for finding in result.findings:
+        line = f"{finding.path}:{finding.line}:{finding.column}: {finding.rule} {finding.message}"
+        if confidence:
+            line = f"{line} [{finding.confidence}]"
+        lines.append(line)
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
@@ -83,11 +120,20 @@ def render_github(result: ScanResult, root: Path | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_sarif(result: ScanResult, root: Path | None = None) -> str:
+def render_sarif(
+    result: ScanResult,
+    root: Path | None = None,
+    *,
+    show_fixes: bool = False,
+    brief_evidence: bool = False,
+) -> str:
     from vyarth import __version__
 
     prefix = _github_prefix(root)
     sources: dict[str, str] = {}
+    ends = {}
+    if root is not None:
+        ends = {row["fingerprint"]: row["end_line"] for row in result.to_report(root=root)["findings"]}
     rules = []
     seen: set[str] = set()
     results = []
@@ -99,31 +145,64 @@ def render_sarif(result: ScanResult, root: Path | None = None) -> str:
                     "id": finding.rule,
                     "shortDescription": {"text": finding.rule},
                     "fullDescription": {"text": _RULE_TEXT.get(finding.rule, finding.rule)},
-                    "helpUri": _HELP_URI,
+                    "helpUri": f"{_HELP_URI}#{finding.rule.lower()}",
                 }
             )
-        results.append(
-            {
-                "ruleId": finding.rule,
-                "level": "error" if finding.confidence >= 90 else "warning",
-                "message": {"text": finding.message},
-                "partialFingerprints": {"vyarth/fingerprint": finding.fingerprint},
-                "locations": [
-                    {
-                        "physicalLocation": {
-                            "artifactLocation": {
-                                "uri": quote(f"{prefix}{finding.path}", safe="/"),
-                                "uriBaseId": "%SRCROOT%",
-                            },
-                            "region": {
-                                "startLine": finding.line,
-                                "startColumn": _sarif_column(root, finding, sources),
-                            },
-                        }
+        end_line = ends.get(finding.fingerprint) or finding.line
+        result_row: dict = {
+            "ruleId": finding.rule,
+            "level": "error" if finding.confidence >= 90 else "warning",
+            "rank": finding.confidence,
+            "message": {"text": finding.message},
+            "partialFingerprints": {"vyarth/fingerprint": finding.fingerprint},
+            "properties": {
+                "confidence": finding.confidence,
+                "reasons": list(finding.reasons),
+                "evidence": _visible_evidence(finding, brief_evidence),
+            },
+            "locations": [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": quote(f"{prefix}{finding.path}", safe="/"),
+                            "uriBaseId": "%SRCROOT%",
+                        },
+                        "region": {
+                            "startLine": finding.line,
+                            "startColumn": _sarif_column(root, finding, sources),
+                            "endLine": end_line,
+                        },
                     }
-                ],
-            }
-        )
+                }
+            ],
+        }
+        if show_fixes and root is not None:
+            from vyarth.fix import applicability, fix_edits
+
+            if applicability(finding) == "safe":
+                edits = fix_edits(root, finding)
+                if edits:
+                    result_row["fixes"] = [
+                        {
+                            "description": {"text": "Remove unused code"},
+                            "artifactChanges": [
+                                {
+                                    "artifactLocation": {"uri": quote(f"{prefix}{finding.path}", safe="/")},
+                                    "replacements": [
+                                        {
+                                            "deletedRegion": {
+                                                "startLine": edit["location"]["row"],
+                                                "endLine": edit["end_location"]["row"],
+                                            },
+                                            "insertedContent": {"text": edit["content"]},
+                                        }
+                                        for edit in edits
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+        results.append(result_row)
     document = {
         "version": "2.1.0",
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -203,7 +282,7 @@ def _escape_message(value: str) -> str:
     return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
-def _render_finding(finding: Finding) -> str:
+def _render_finding(finding: Finding, *, brief_evidence: bool = False) -> str:
     label = _LABELS.get(finding.rule, "Symbol")
     lines = [
         finding.rule,
@@ -214,6 +293,23 @@ def _render_finding(finding: Finding) -> str:
     ]
     if finding.rule in _WITH_REASON and finding.message:
         lines.append(f"Reason: {finding.message}")
-    for item in finding.evidence:
+    for item in _visible_evidence(finding, brief_evidence):
         lines.append(f"Evidence: {item}")
     return "\n".join(lines)
+
+
+def _jsonl_row(finding: dict, brief: bool) -> dict:
+    """jsonl drops fields a caller can derive, so a 50-line window stays small."""
+    if not brief:
+        return finding
+    row = {key: value for key, value in finding.items() if key not in _BRIEF_JSONL_OMIT}
+    fix = row.get("fix")
+    if isinstance(fix, dict) and fix.get("applicability") == "none" and "edits" not in fix:
+        row.pop("fix")
+    return row
+
+
+def _visible_evidence(finding: Finding, brief: bool) -> list[str]:
+    if not brief:
+        return list(finding.evidence)
+    return [item for item in finding.evidence if item not in BRIEF_EVIDENCE]

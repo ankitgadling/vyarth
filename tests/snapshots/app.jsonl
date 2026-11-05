@@ -1,0 +1,2 @@
+{"id":"VYFXA7GLCT","fingerprint":"UNUSED_IMPORT:app.py:os","rule":"UNUSED_IMPORT","path":"app.py","line":1,"column":8,"symbol":"os","status":"DEAD","confidence":100,"message":"Import 'os' is never used.","reasons":["no_references"],"evidence":[],"fix":{"applicability":"safe"}}
+{"type":"summary","total":1,"shown":1,"truncated":false,"by_rule":{"UNUSED_IMPORT":1},"by_band":{"100":1,"90-99":0,"70-89":0,"0-69":0},"fixable":{"safe":1,"unsafe":0}}

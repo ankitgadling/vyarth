@@ -3,14 +3,63 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import difflib
 from io import StringIO
+import json
 from pathlib import Path
+import re
+import subprocess
 import tokenize
+from typing import Any
 
 from vyarth.confidence import PROBE_NOTE, REEXPORT_NOTE, SIDE_EFFECT_NOTE
 from vyarth.discover import read_python_source
-from vyarth.model import Finding
+from vyarth.incremental import ensure_cache_markers
+from vyarth.model import Finding, qualname_of
+from vyarth.verify import run_verification
+
+
+@dataclass(frozen=True)
+class AppliedFix:
+    """One rewrite. The CLI renders the sentence. Machine reports keep this object."""
+
+    id: str
+    fingerprint: str
+    path: str
+    line: int
+    symbol: str
+    applicability: str
+
+
+@dataclass(frozen=True)
+class SkippedFix:
+    id: str
+    path: str
+    line: int
+    symbol: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class FixReport:
+    """Result of a verified fix. A failed check restores the snapshot."""
+
+    applied: tuple[AppliedFix, ...]
+    skipped: tuple[SkippedFix, ...]
+    verified: bool
+    rolled_back: bool
+    failed_step: str
+    output_tail: str
+
+    def failure(self) -> dict[str, object]:
+        return {
+            "verified": self.verified,
+            "rolled_back": self.rolled_back,
+            "failed_step": self.failed_step,
+            "output_tail": self.output_tail,
+        }
 
 
 def apply_fixes(
@@ -18,10 +67,11 @@ def apply_fixes(
     findings: list[Finding] | tuple[Finding, ...],
     *,
     unsafe: bool = False,
+    unsafe_fixes: bool = False,
     write: bool = True,
-) -> list[str]:
-    """Apply every safe rewrite. Returns a note for each edit."""
-    return _write(root, list(findings), unsafe=unsafe, write=write)
+) -> list[AppliedFix]:
+    """Apply every safe rewrite. Returns one record for each edit."""
+    return _write(root, list(findings), unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=write)
 
 
 def apply_import_fixes(
@@ -30,10 +80,101 @@ def apply_import_fixes(
     *,
     unsafe: bool = False,
     write: bool = True,
-) -> list[str]:
-    """Remove unused import names. Returns a note for each edit."""
+) -> list[AppliedFix]:
+    """Remove unused import names. Returns one record for each edit."""
     chosen = [finding for finding in findings if finding.rule == "UNUSED_IMPORT"]
     return _write(root, chosen, unsafe=unsafe, write=write)
+
+
+def apply_fixes_verified(
+    root: Path,
+    findings: list[Finding] | tuple[Finding, ...],
+    *,
+    unsafe: bool = False,
+    unsafe_fixes: bool = False,
+    verify_cmd: str = "",
+    timeout: int = 60,
+    verify_each: bool = False,
+) -> FixReport:
+    """Write edits, compile them, and restore the snapshot when a check fails."""
+    kept, skipped = split_dirty(root, list(findings), unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+    if verify_each:
+        return _verify_each(root, kept, skipped, unsafe=unsafe, unsafe_fixes=unsafe_fixes, verify_cmd=verify_cmd, timeout=timeout)
+    return _verify_all(root, kept, skipped, unsafe=unsafe, unsafe_fixes=unsafe_fixes, verify_cmd=verify_cmd, timeout=timeout)
+
+
+def ensure_clean(root: Path) -> None:
+    """Refuse a fix when the worktree has uncommitted changes."""
+    status = _git(root, ["git", "status", "--porcelain"])
+    if status is None:
+        raise ValueError("not a git repository")
+    if status.strip():
+        raise ValueError("dirty worktree")
+
+
+def render_applied(item: AppliedFix, *, wrote: bool) -> str:
+    """The sentence previously printed for one edit."""
+    if item.line <= 0:
+        return item.symbol
+    verb = "fixed" if wrote else "would fix"
+    return f"{verb} {item.path}:{item.line} {item.symbol}"
+
+
+def applicability(finding: Finding, source: str | None = None) -> str:
+    """`safe` when the rewrite may run. `unsafe` is a nested 90–99 name. Otherwise `none`."""
+    if is_fixable(finding, source):
+        return "safe"
+    qualname = finding.qualname or qualname_of(finding)
+    nested = "." in qualname
+    if nested and 90 <= finding.confidence <= 99 and finding.rule in {"UNUSED_FUNCTION", "UNUSED_VARIABLE", "UNREACHABLE_CODE"}:
+        return "unsafe"
+    return "none"
+
+
+def fix_edits(root: Path, finding: Finding) -> list[dict[str, Any]]:
+    """Edits for one safe finding. An unsafe or missing file contributes nothing."""
+    path = root / finding.path
+    if not path.is_file():
+        return []
+    try:
+        source, _encoding = read_python_source(path)
+    except OSError:
+        return []
+    level = applicability(finding, source)
+    if level == "none":
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    removed: dict[int, tuple[int, int]] = {}
+    edits = _import_edits(tree, source, [finding], finding.path, unsafe=False, verb="fixed", removed=removed)
+    edits.extend(
+        _statement_edits(
+            tree,
+            source,
+            [finding],
+            finding.path,
+            verb="fixed",
+            removed=removed,
+            unsafe_fixes=level == "unsafe",
+        )
+    )
+    edits = _keep_suites(tree, source, edits, removed)
+    rendered: list[dict[str, Any]] = []
+    for start, end, replacement, _notes in edits:
+        rendered.append(
+            {
+                "content": replacement,
+                "location": {"row": start, "column": 1},
+                "end_location": {"row": end, "column": 1},
+            }
+        )
+    return rendered
+
+
+def applied_dicts(items: list[AppliedFix]) -> list[dict[str, Any]]:
+    return [asdict(item) for item in items]
 
 
 def render_fix_diff(
@@ -41,10 +182,16 @@ def render_fix_diff(
     findings: list[Finding] | tuple[Finding, ...],
     *,
     unsafe: bool = False,
+    unsafe_fixes: bool = False,
 ) -> str:
     """Unified diff of the rewrites. Nothing is written."""
     chunks: list[str] = []
-    for relpath, before, after, _, _ in _previews(root, list(findings), unsafe=unsafe):
+    for relpath, before, after, _, _ in _previews(
+        root,
+        list(findings),
+        unsafe=unsafe,
+        unsafe_fixes=unsafe_fixes,
+    ):
         chunks.extend(
             difflib.unified_diff(
                 before.splitlines(keepends=True),
@@ -54,6 +201,42 @@ def render_fix_diff(
             )
         )
     return "".join(chunks)
+
+
+def render_fix_diff_json(
+    root: Path,
+    findings: list[Finding] | tuple[Finding, ...],
+    *,
+    unsafe: bool = False,
+    unsafe_fixes: bool = False,
+) -> str:
+    """One diff per finding that would be rewritten."""
+    edits: list[dict[str, str]] = []
+    for finding in findings:
+        preview = _previews(root, [finding], unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+        if not preview:
+            continue
+        relpath, before, after, _, _ = preview[0]
+        if before == after:
+            continue
+        diff = "".join(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=relpath,
+                tofile=relpath,
+            )
+        )
+        source = before
+        edits.append(
+            {
+                "id": finding.id,
+                "path": finding.path,
+                "diff": diff,
+                "applicability": applicability(finding, source),
+            }
+        )
+    return json.dumps({"edits": edits}, indent=2) + "\n"
 
 
 def is_fixable(finding: Finding, source: str | None = None) -> bool:
@@ -80,6 +263,7 @@ def rewrite_source(
     relpath: str,
     *,
     unsafe: bool = False,
+    unsafe_fixes: bool = False,
     verb: str = "fixed",
 ) -> tuple[str, list[str]]:
     """Return edited source and a note for each change. The file is not written."""
@@ -90,7 +274,17 @@ def rewrite_source(
     chosen = list(findings)
     removed: dict[int, tuple[int, int]] = {}
     edits = _import_edits(tree, source, chosen, relpath, unsafe=unsafe, verb=verb, removed=removed)
-    edits.extend(_statement_edits(tree, source, chosen, relpath, verb=verb, removed=removed))
+    edits.extend(
+        _statement_edits(
+            tree,
+            source,
+            chosen,
+            relpath,
+            verb=verb,
+            removed=removed,
+            unsafe_fixes=unsafe_fixes,
+        )
+    )
     edits = _keep_suites(tree, source, edits, removed)
     updated, notes = _apply_edits(source, edits)
     try:
@@ -100,10 +294,28 @@ def rewrite_source(
     return updated, notes
 
 
-def _write(root: Path, findings: list[Finding], *, unsafe: bool, write: bool) -> list[str]:
+def _write(
+    root: Path,
+    findings: list[Finding],
+    *,
+    unsafe: bool,
+    write: bool,
+    unsafe_fixes: bool = False,
+    check_dirty: bool = True,
+) -> list[AppliedFix]:
     verb = "fixed" if write else "would fix"
+    if check_dirty:
+        kept, skipped = split_dirty(root, findings, unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+    else:
+        kept, skipped = list(findings), []
     notes: list[str] = []
-    for relpath, source, updated, edits, encoding in _previews(root, findings, unsafe=unsafe, verb=verb):
+    for relpath, source, updated, edits, encoding in _previews(
+        root,
+        kept,
+        unsafe=unsafe,
+        unsafe_fixes=unsafe_fixes,
+        verb=verb,
+    ):
         if source == updated:
             notes.extend(edits)
             continue
@@ -113,7 +325,50 @@ def _write(root: Path, findings: list[Finding], *, unsafe: bool, write: bool) ->
         path = root / relpath
         _write_python(path, updated, encoding)
         notes.extend(edits)
-    return notes
+    applied = [_applied(findings, note, verb) for note in notes]
+    for finding in skipped:
+        applied.append(
+            AppliedFix(
+                finding.id,
+                finding.fingerprint,
+                finding.path,
+                0,
+                f"skipped {finding.path}:{finding.line} {finding.symbol}: dirty_lines",
+                "none",
+            )
+        )
+    return applied
+
+
+def _applied(findings: list[Finding], note: str, verb: str) -> AppliedFix:
+    parsed = _parse_note(note, verb)
+    if parsed is None:
+        return AppliedFix("", "", "", 0, note, "none")
+    path, line, symbol = parsed
+    finding = next((item for item in findings if item.path == path and item.line == line and item.symbol == symbol), None)
+    if finding is None:
+        # A note can name several symbols at one line, so match on the line alone.
+        same_line = [item for item in findings if item.path == path and item.line == line]
+        finding = same_line[0] if len(same_line) == 1 else None
+    if finding is None:
+        return AppliedFix("", "", path, line, symbol, "safe")
+    level = applicability(finding) if finding is not None else "safe"
+    if level == "none":
+        level = "safe"
+    return AppliedFix(finding.id, finding.fingerprint, path, line, symbol, level)
+
+
+_NOTE = re.compile(r"^(?P<path>.+?):(?P<line>\d+) (?P<symbol>.+)$")
+
+
+def _parse_note(note: str, verb: str) -> tuple[str, int, str] | None:
+    prefix = f"{verb} "
+    if not note.startswith(prefix):
+        return None
+    match = _NOTE.match(note[len(prefix) :])
+    if match is None:
+        return None
+    return match.group("path"), int(match.group("line")), match.group("symbol")
 
 
 def _previews(
@@ -122,6 +377,7 @@ def _previews(
     *,
     unsafe: bool,
     verb: str = "fixed",
+    unsafe_fixes: bool = False,
 ) -> list[tuple[str, str, str, list[str], str]]:
     grouped: dict[str, list[Finding]] = {}
     for finding in findings:
@@ -132,7 +388,14 @@ def _previews(
         if not path.is_file():
             continue
         source, encoding = read_python_source(path)
-        updated, edits = rewrite_source(source, items, relpath, unsafe=unsafe, verb=verb)
+        updated, edits = rewrite_source(
+            source,
+            items,
+            relpath,
+            unsafe=unsafe,
+            unsafe_fixes=unsafe_fixes,
+            verb=verb,
+        )
         if updated == source and not edits:
             continue
         previews.append((relpath, source, updated, edits, encoding))
@@ -300,17 +563,20 @@ def _statement_edits(
     *,
     verb: str,
     removed: dict[int, tuple[int, int]],
+    unsafe_fixes: bool = False,
 ) -> list[tuple[int, int, str, tuple[str, ...]]]:
     parents = _parents(tree)
     locals_at = {
         (finding.line, finding.symbol)
         for finding in findings
-        if finding.rule == "UNUSED_VARIABLE" and finding.confidence >= 100 and _nested_name(finding)
+        if finding.rule == "UNUSED_VARIABLE"
+        and _nested_name(finding)
+        and _rewrite_level(finding, source, unsafe_fixes) != "skip"
     }
     edits: list[tuple[int, int, str, tuple[str, ...]]] = []
     variable_edits: list[tuple[tuple[int, int, str, tuple[str, ...]], int, str]] = []
     for finding in findings:
-        if finding.confidence < 100:
+        if _rewrite_level(finding, source, unsafe_fixes) == "skip":
             continue
         edit: tuple[int, int, str, tuple[str, ...]] | None = None
         if finding.rule == "UNREACHABLE_CODE" and not _sole_yield(source, finding.line):
@@ -647,3 +913,294 @@ def _nested_name(finding: Finding) -> bool:
     prefix = f"{finding.rule}:{finding.path}:"
     qualname = finding.fingerprint[len(prefix) :] if finding.fingerprint.startswith(prefix) else finding.symbol
     return "." in qualname
+
+
+def _rewrite_level(finding: Finding, source: str, unsafe_fixes: bool) -> str:
+    level = applicability(finding, source)
+    if level == "safe":
+        return "safe"
+    if level == "unsafe" and unsafe_fixes:
+        return "unsafe"
+    return "skip"
+
+
+def split_dirty(
+    root: Path,
+    findings: list[Finding],
+    *,
+    unsafe: bool,
+    unsafe_fixes: bool,
+) -> tuple[list[Finding], list[Finding]]:
+    """Drop an edit whose lines are already changed in the worktree."""
+    dirty = _worktree_dirty_lines(root)
+    if not dirty:
+        return list(findings), []
+    kept: list[Finding] = []
+    skipped: list[Finding] = []
+    for finding in findings:
+        lines = dirty.get(finding.path.replace("\\", "/"), set())
+        if lines and _overlaps_dirty(root, finding, lines, unsafe=unsafe, unsafe_fixes=unsafe_fixes):
+            skipped.append(finding)
+        else:
+            kept.append(finding)
+    return kept, skipped
+
+
+def _overlaps_dirty(
+    root: Path,
+    finding: Finding,
+    dirty_lines: set[int],
+    *,
+    unsafe: bool,
+    unsafe_fixes: bool,
+) -> bool:
+    if finding.line in dirty_lines:
+        return True
+    path = root / finding.path
+    if not path.is_file():
+        return False
+    try:
+        source, _encoding = read_python_source(path)
+    except OSError:
+        return False
+    updated, _notes = rewrite_source(
+        source,
+        [finding],
+        finding.path,
+        unsafe=unsafe,
+        unsafe_fixes=unsafe_fixes,
+    )
+    if updated == source:
+        return False
+    return bool(_changed_lines(source, updated) & dirty_lines)
+
+
+def _changed_lines(before: str, after: str) -> set[int]:
+    matcher = difflib.SequenceMatcher(a=before.splitlines(), b=after.splitlines())
+    lines: set[int] = set()
+    for tag, start, end, _j1, _j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if start == end:
+            lines.add(start + 1)
+            continue
+        lines.update(range(start + 1, end + 1))
+    return lines
+
+
+def _verify_all(
+    root: Path,
+    findings: list[Finding],
+    skipped: list[Finding],
+    *,
+    unsafe: bool,
+    unsafe_fixes: bool,
+    verify_cmd: str,
+    timeout: int,
+) -> FixReport:
+    blocked, snapshots = _snapshot(root, findings, unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+    held = [_skip(item, "dirty_lines") for item in skipped] + blocked
+    blocked_paths = {item.path for item in blocked}
+    writable = [finding for finding in findings if finding.path not in blocked_paths]
+    if not snapshots:
+        return _report((), held, verified=True, rolled_back=False, failed_step="", output_tail="")
+    applied = _write(root, writable, unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=True, check_dirty=False)
+    checked = run_verification(root, list(snapshots), verify_cmd, timeout)
+    if checked.ok:
+        return _report(_written(applied), held, verified=True, rolled_back=False, failed_step="", output_tail="")
+    if not _restore(root, snapshots):
+        return _report((), held, verified=False, rolled_back=False, failed_step="restore", output_tail=checked.output)
+    return _report((), held, verified=False, rolled_back=True, failed_step=checked.step, output_tail=checked.output)
+
+
+def _verify_each(
+    root: Path,
+    findings: list[Finding],
+    skipped: list[Finding],
+    *,
+    unsafe: bool,
+    unsafe_fixes: bool,
+    verify_cmd: str,
+    timeout: int,
+) -> FixReport:
+    groups: dict[str, list[Finding]] = {}
+    for finding in findings:
+        groups.setdefault(finding.path, []).append(finding)
+    applied: list[AppliedFix] = []
+    held = [_skip(item, "dirty_lines") for item in skipped]
+    failed_step = ""
+    output = ""
+    rolled = False
+    for items in groups.values():
+        blocked, snapshots = _snapshot(root, items, unsafe=unsafe, unsafe_fixes=unsafe_fixes)
+        held.extend(blocked)
+        if not snapshots:
+            continue
+        wrote = _write(root, items, unsafe=unsafe, unsafe_fixes=unsafe_fixes, write=True, check_dirty=False)
+        checked = run_verification(root, list(snapshots), verify_cmd, timeout)
+        if checked.ok:
+            applied.extend(_written(wrote))
+            continue
+        if not _restore(root, snapshots):
+            return _report(applied, held, verified=False, rolled_back=False, failed_step="restore", output_tail=checked.output)
+        rolled = True
+        failed_step = failed_step or checked.step
+        output = output or checked.output
+    return _report(applied, held, verified=not rolled, rolled_back=rolled, failed_step=failed_step, output_tail=output)
+
+
+def _snapshot(
+    root: Path,
+    findings: list[Finding],
+    *,
+    unsafe: bool,
+    unsafe_fixes: bool,
+) -> tuple[list[SkippedFix], dict[str, bytes]]:
+    """Original bytes of files a rewrite would change. A failed copy is skipped."""
+    blocked: list[SkippedFix] = []
+    snapshots: dict[str, bytes] = {}
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    seen: set[str] = set()
+    for relpath, source, updated, _edits, _encoding in _previews(
+        root,
+        findings,
+        unsafe=unsafe,
+        unsafe_fixes=unsafe_fixes,
+    ):
+        if source == updated or relpath in snapshots or relpath in seen:
+            continue
+        path = root / relpath
+        try:
+            data = path.read_bytes()
+        except OSError:
+            blocked.extend(_skip(item, "snapshot") for item in findings if item.path == relpath)
+            seen.add(relpath)
+            continue
+        if not _save_backup(root, stamp, relpath, data):
+            blocked.extend(_skip(item, "snapshot") for item in findings if item.path == relpath)
+            seen.add(relpath)
+            continue
+        snapshots[relpath] = data
+    return blocked, snapshots
+
+
+def _save_backup(root: Path, stamp: str, relpath: str, data: bytes) -> bool:
+    dest = root / ".vyarth" / "backup" / stamp / relpath
+    try:
+        ensure_cache_markers(root)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    except OSError:
+        return False
+    return True
+
+
+def _restore(root: Path, snapshots: dict[str, bytes]) -> bool:
+    try:
+        for relpath, data in snapshots.items():
+            (root / relpath).write_bytes(data)
+    except OSError:
+        return False
+    return True
+
+
+def _written(applied: list[AppliedFix]) -> list[AppliedFix]:
+    return [item for item in applied if item.line > 0]
+
+
+def _skip(finding: Finding, reason: str) -> SkippedFix:
+    return SkippedFix(finding.id, finding.path, finding.line, finding.symbol, reason)
+
+
+def _report(
+    applied: list[AppliedFix] | tuple[AppliedFix, ...],
+    skipped: list[SkippedFix],
+    *,
+    verified: bool,
+    rolled_back: bool,
+    failed_step: str,
+    output_tail: str,
+) -> FixReport:
+    return FixReport(
+        applied=tuple(applied),
+        skipped=tuple(skipped),
+        verified=verified,
+        rolled_back=rolled_back,
+        failed_step=failed_step,
+        output_tail=output_tail,
+    )
+
+
+def _worktree_dirty_lines(root: Path) -> dict[str, set[int]] | None:
+    inside = _git(root, ["git", "rev-parse", "--is-inside-work-tree"])
+    if inside is None or inside.strip() != "true":
+        return None
+    diff = _git(root, ["git", "-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD"])
+    if diff is None:
+        return {}
+    prefix = (_git(root, ["git", "rev-parse", "--show-prefix"]) or "").strip()
+    return _parse_dirty(diff, prefix)
+
+
+def _diff_path(header: str) -> str:
+    """The new path from a `+++` header, or "" for `/dev/null` and unknown forms."""
+    header = header.rstrip("	")
+    if header == "/dev/null":
+        return ""
+    if header.startswith('"') and header.endswith('"') and len(header) >= 2:
+        try:
+            header = json.loads(header)
+        except ValueError:
+            header = header[1:-1]
+    if header.startswith("b/"):
+        return header[2:]
+    return ""
+
+
+def _parse_dirty(diff: str, prefix: str) -> dict[str, set[int]]:
+    found: dict[str, set[int]] = {}
+    current = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            current = _diff_path(line[4:])
+            if not current:
+                continue
+            if prefix and current.startswith(prefix):
+                current = current[len(prefix) :]
+            found.setdefault(current, set())
+            continue
+        if not line.startswith("@@") or not current:
+            continue
+        parts = line.split(" ")
+        if len(parts) < 3 or not parts[2].startswith("+"):
+            continue
+        plus = parts[2][1:]
+        if "," in plus:
+            start_text, count_text = plus.split(",", 1)
+            start, count = int(start_text), int(count_text)
+        else:
+            start, count = int(plus), 1
+        bucket = found.setdefault(current, set())
+        if count <= 0:
+            bucket.add(max(start, 1))
+            continue
+        bucket.update(range(start, start + count))
+    return found
+
+
+def _git(root: Path, args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout

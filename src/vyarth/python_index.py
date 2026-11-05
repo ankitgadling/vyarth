@@ -136,6 +136,8 @@ class _Indexer(ast.NodeVisitor):
         self._origin = ""
         self.lambda_mentions: set[str] = set()
         self.module_strings: set[str] = set()
+        self.setting_strings: list[tuple[str, str]] = []
+        self.module_sweeps: set[str] = set()
 
     def index(self) -> FileIndex:
         tree = ast.parse(self.source, filename=self.path, type_comments=True)
@@ -176,6 +178,8 @@ class _Indexer(ast.NodeVisitor):
             import_probes=tuple(dict.fromkeys(self.import_probes)),
             lambda_mentions=tuple(sorted(self.lambda_mentions)),
             module_strings=tuple(sorted(self.module_strings)),
+            setting_strings=tuple(self.setting_strings),
+            module_sweeps=tuple(sorted(self.module_sweeps)),
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -388,6 +392,8 @@ class _Indexer(ast.NodeVisitor):
             self._note_exports(target, node.value)
             self._note_instance(target, node.value)
             self._note_flow(target, node.value)
+        for target in node.targets:
+            self._note_setting_list(target, node.value)
         slots = _sequence_slots(node.value)
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and slots is not None:
             self._visit_container(node.value)
@@ -424,6 +430,7 @@ class _Indexer(ast.NodeVisitor):
             self._visit_with_origin("with", node.optional_vars)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._note_setting_list(node.target, node.value)
         if isinstance(node.op, ast.Add):
             self._note_exports(node.target, node.value)
         slots = _sequence_slots(node.value) if isinstance(node.op, ast.Add) else None
@@ -453,6 +460,7 @@ class _Indexer(ast.NodeVisitor):
         if node.annotation is not None:
             self._visit_annotation(node.annotation)
         if node.value is not None:
+            self._note_setting_list(node.target, node.value)
             self._note_exports(node.target, node.value)
             self._note_instance(node.target, node.value)
             self._note_flow(node.target, node.value)
@@ -517,6 +525,7 @@ class _Indexer(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if self._suppress == 0:
             self._note_dynamic(node)
+            self._note_module_sweep(node)
             self._note_all_mutation(node)
         mutation = _container_mutation(node)
         self._note_call(node)
@@ -1228,6 +1237,31 @@ class _Indexer(ast.NodeVisitor):
         elif func.attr == "extend" and len(node.args) == 1:
             self.exports.update(_export_names(node.args[0]))
 
+    def _note_setting_list(self, target: ast.expr, value: ast.expr) -> None:
+        """Dotted strings stored in a settings list Django imports by name."""
+        if self.scope.kind != "module" or not isinstance(target, ast.Name):
+            return
+        if not _is_setting_container(target.id):
+            return
+        qualname = _qualname(self.scope, target.id)
+        for text in _dotted_literals(value):
+            self.setting_strings.append((qualname, text))
+
+    def _note_module_sweep(self, node: ast.Call) -> None:
+        """`dir(module)` or `getattr(module, name)` may read every attribute."""
+        func = node.func
+        if not isinstance(func, ast.Name) or not node.args or not isinstance(node.args[0], ast.Name):
+            return
+        if func.id == "dir":
+            self.module_sweeps.add(node.args[0].id)
+            return
+        if func.id != "getattr" or len(node.args) < 2:
+            return
+        literal = node.args[1]
+        if isinstance(literal, ast.Constant) and isinstance(literal.value, str) and literal.value.isidentifier():
+            return
+        self.module_sweeps.add(node.args[0].id)
+
     def _note_dynamic(self, node: ast.Call) -> None:
         name = _dynamic_call_name(node.func)
         if name:
@@ -1354,6 +1388,21 @@ _TYPING_FORMS = {
 }
 _IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError"}
 _MODULE_STRING = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_SETTING_CONTAINERS = frozenset({"MIDDLEWARE", "INSTALLED_APPS", "AUTHENTICATION_BACKENDS"})
+
+
+def _is_setting_container(name: str) -> bool:
+    return name in _SETTING_CONTAINERS or name.endswith("_BACKEND") or name.endswith("_BACKENDS")
+
+
+def _dotted_literals(node: ast.AST) -> list[str]:
+    found: list[str] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Constant) or not isinstance(child.value, str):
+            continue
+        if "." in child.value and _MODULE_STRING.match(child.value):
+            found.append(child.value)
+    return found
 
 
 def _form_name(node: ast.expr) -> str | None:
